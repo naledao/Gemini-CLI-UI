@@ -4,6 +4,7 @@ import { FitAddon } from 'xterm-addon-fit';
 import { ClipboardAddon } from '@xterm/addon-clipboard';
 import { WebglAddon } from '@xterm/addon-webgl';
 import 'xterm/css/xterm.css';
+import { useLanguage } from '../contexts/LanguageContext';
 
 // CSS to remove xterm focus outline
 const xtermStyles = `
@@ -30,6 +31,7 @@ if (typeof document !== 'undefined') {
 const shellSessions = new Map();
 
 function Shell({ selectedProject, selectedSession, isActive }) {
+  const { t, language } = useLanguage();
   const terminalRef = useRef(null);
   const terminal = useRef(null);
   const fitAddon = useRef(null);
@@ -392,7 +394,14 @@ function Shell({ selectedProject, selectedSession, isActive }) {
     }, 100);
   }, [isActive, isInitialized]);
 
-  // WebSocket connection function (called manually)
+  // Automatically connect to shell when active and ready
+  useEffect(() => {
+    if (isInitialized && !isConnected && !isConnecting && isActive && selectedProject) {
+      connectToShell();
+    }
+  }, [isInitialized, isConnected, isConnecting, isActive, selectedProject]);
+
+  // WebSocket connection function (called manually or automatically)
   const connectWebSocket = async () => {
     if (isConnecting || isConnected) return;
     
@@ -401,37 +410,17 @@ function Shell({ selectedProject, selectedSession, isActive }) {
       const token = localStorage.getItem('auth-token');
       if (!token) {
         console.error('No authentication token found for Shell WebSocket connection');
+        if (terminal.current) {
+          terminal.current.write(`\x1b[1;31m${t('shell.authRequired')}\x1b[0m\r\n`);
+        }
         return;
       }
       
-      // Fetch server configuration to get the correct WebSocket URL
-      let wsBaseUrl;
-      try {
-        const configResponse = await fetch('/api/config', {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        });
-        const config = await configResponse.json();
-        wsBaseUrl = config.wsUrl;
-        
-        // If the config returns localhost but we're not on localhost, use current host but with API server port
-        if (wsBaseUrl.includes('localhost') && !window.location.hostname.includes('localhost')) {
-          const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-          // For development, API server is typically on port 4008 when Vite is on 4009
-          const apiPort = window.location.port === '4009' ? '4008' : window.location.port;
-          wsBaseUrl = `${protocol}//${window.location.hostname}:${apiPort}`;
-        }
-      } catch (error) {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        // For development, API server is typically on port 4008 when Vite is on 4009
-        const apiPort = window.location.port === '4009' ? '4008' : window.location.port;
-        wsBaseUrl = `${protocol}//${window.location.hostname}:${apiPort}`;
-      }
-      
-      // Include token in WebSocket URL as query parameter
-      const wsUrl = `${wsBaseUrl}/shell?token=${encodeURIComponent(token)}`;
-      console.log('Connecting to WebSocket:', wsUrl.replace(/token=.*/, 'token=[REDACTED]'));
+      // Directly connect using the current page's origin host and port
+      // The Vite dev server proxies /shell to port 4008, so this works for localhost, LAN, and FRP domain!
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/shell?token=${encodeURIComponent(token)}`;
+      console.log('Connecting to Shell WebSocket:', wsUrl.replace(/token=.*/, 'token=[REDACTED]'));
       
       ws.current = new WebSocket(wsUrl);
 
@@ -493,8 +482,6 @@ function Shell({ selectedProject, selectedSession, isActive }) {
               urls.push(match[1]);
             }
             
-            // If URLs found, log them for potential opening
-            
             terminal.current.write(output);
           } else if (data.type === 'url_open') {
             // Handle explicit URL opening requests from server
@@ -514,11 +501,10 @@ function Shell({ selectedProject, selectedSession, isActive }) {
           terminal.current.clear();
           terminal.current.write('\x1b[2J\x1b[H'); // Clear screen and move cursor to home
           if (event.code !== 1000) {
-            terminal.current.write(`\x1b[1;31mConnection closed: ${event.reason || 'Unknown error (code: ' + event.code + ')'}\x1b[0m\r\n`);
+            const reason = event.reason || (language === 'zh' ? `未知错误 (代码: ${event.code})` : `Unknown error (code: ${event.code})`);
+            terminal.current.write(`\x1b[1;31m${t('shell.connectionClosed', { reason })}\x1b[0m\r\n`);
           }
         }
-        
-        // Don't auto-reconnect anymore - user must manually connect
       };
 
       ws.current.onerror = (error) => {
@@ -526,7 +512,7 @@ function Shell({ selectedProject, selectedSession, isActive }) {
         setIsConnected(false);
         setIsConnecting(false);
         if (terminal.current) {
-          terminal.current.write('\r\n\x1b[1;31mConnection error. Please check console for details.\x1b[0m\r\n');
+          terminal.current.write(`\r\n\x1b[1;31m${t('shell.connectionError')}\x1b[0m\r\n`);
         }
       };
     } catch (error) {
@@ -534,7 +520,7 @@ function Shell({ selectedProject, selectedSession, isActive }) {
       setIsConnected(false);
       setIsConnecting(false);
       if (terminal.current) {
-        terminal.current.write(`\x1b[1;31mFailed to connect: ${error.message}\x1b[0m\r\n`);
+        terminal.current.write(`\x1b[1;31m${t('shell.failedToConnect', { error: error.message })}\x1b[0m\r\n`);
       }
     }
   };
@@ -549,8 +535,8 @@ function Shell({ selectedProject, selectedSession, isActive }) {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z" />
             </svg>
           </div>
-          <h3 className="text-lg font-semibold mb-2">Select a Project</h3>
-          <p>Choose a project to open an interactive shell in that directory</p>
+          <h3 className="text-lg font-semibold mb-2">{t('shell.selectProjectTitle')}</h3>
+          <p>{t('shell.selectProjectDesc')}</p>
         </div>
       </div>
     );
@@ -563,19 +549,17 @@ function Shell({ selectedProject, selectedSession, isActive }) {
         <div className="flex items-center justify-between">
           <div className="flex items-center space-x-2">
             <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
-            {selectedSession && (
-              <span className="text-xs text-blue-300">
-                ({selectedSession.summary.slice(0, 30)}...)
-              </span>
-            )}
-            {!selectedSession && (
-              <span className="text-xs text-gray-400">(New Session)</span>
-            )}
+            <span className="text-xs font-medium text-gray-300">
+              {t('shell.terminalTitle')}
+            </span>
+            <span className="text-xs text-gray-400 font-mono">
+              ({selectedProject.displayName})
+            </span>
             {!isInitialized && (
-              <span className="text-xs text-yellow-400">(Initializing...)</span>
+              <span className="text-xs text-yellow-400">({t('shell.initializing')})</span>
             )}
             {isRestarting && (
-              <span className="text-xs text-blue-400">(Restarting...)</span>
+              <span className="text-xs text-blue-400">({t('shell.restarting')})</span>
             )}
           </div>
           <div className="flex items-center space-x-3">
@@ -583,12 +567,12 @@ function Shell({ selectedProject, selectedSession, isActive }) {
               <button
                 onClick={disconnectFromShell}
                 className="px-3 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700 flex items-center space-x-1"
-                title="Disconnect from shell"
+                title={t('shell.disconnectTitle')}
               >
                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
-                <span>Disconnect</span>
+                <span>{t('shell.disconnect')}</span>
               </button>
             )}
             
@@ -596,12 +580,12 @@ function Shell({ selectedProject, selectedSession, isActive }) {
               onClick={restartShell}
               disabled={isRestarting || isConnected}
               className="text-xs text-gray-400 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1"
-              title="Restart Shell (disconnect first)"
+              title={t('shell.restartTitle')}
             >
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
-              <span>Restart</span>
+              <span>{t('shell.restart')}</span>
             </button>
           </div>
         </div>
@@ -614,7 +598,7 @@ function Shell({ selectedProject, selectedSession, isActive }) {
         {/* Loading state */}
         {!isInitialized && (
           <div className="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-90">
-            <div className="text-white">Loading terminal...</div>
+            <div className="text-white">{t('shell.loadingTerminal')}</div>
           </div>
         )}
         
@@ -625,18 +609,15 @@ function Shell({ selectedProject, selectedSession, isActive }) {
               <button
                 onClick={connectToShell}
                 className="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors flex items-center justify-center space-x-2 text-base font-medium w-full sm:w-auto"
-                title="Connect to shell"
+                title={t('shell.continueInShell')}
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                 </svg>
-                <span>Continue in Shell</span>
+                <span>{t('shell.continueInShell')}</span>
               </button>
               <p className="text-gray-400 text-sm mt-3 px-2">
-                {selectedSession ? 
-                  `Resume session: ${selectedSession.summary.slice(0, 50)}...` : 
-                  'Start a new Gemini session'
-                }
+                {t('shell.startNewSession')}
               </p>
             </div>
           </div>
@@ -648,10 +629,10 @@ function Shell({ selectedProject, selectedSession, isActive }) {
             <div className="text-center max-w-sm w-full">
               <div className="flex items-center justify-center space-x-3 text-yellow-400">
                 <div className="w-6 h-6 animate-spin rounded-full border-2 border-yellow-400 border-t-transparent"></div>
-                <span className="text-base font-medium">Connecting to shell...</span>
+                <span className="text-base font-medium">{t('shell.connectingToShell')}</span>
               </div>
               <p className="text-gray-400 text-sm mt-3 px-2">
-                Starting Gemini CLI in {selectedProject.displayName}
+                {t('shell.startingGeminiIn', { dir: selectedProject.displayName })}
               </p>
             </div>
           </div>

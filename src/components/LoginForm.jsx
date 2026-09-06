@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { useLanguage } from '../contexts/LanguageContext';
+import LanguageToggle from './LanguageToggle';
 import { MessageSquare } from 'lucide-react';
 
 const LoginForm = () => {
@@ -9,13 +11,14 @@ const LoginForm = () => {
   const [error, setError] = useState('');
   
   const { login } = useAuth();
+  const { t } = useLanguage();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
     
     if (!username || !password) {
-      setError('Please enter both username and password');
+      setError(t('auth.enterCredentialsError'));
       return;
     }
     
@@ -31,7 +34,12 @@ const LoginForm = () => {
   };
 
   return (
-    <div className="min-h-screen bg-background flex items-center justify-center p-4">
+    <div className="min-h-screen bg-background flex items-center justify-center p-4 relative">
+      {/* Top right language switch */}
+      <div className="absolute top-4 right-4">
+        <LanguageToggle />
+      </div>
+
       <div className="w-full max-w-md">
         <div className="bg-card rounded-lg shadow-lg border border-border p-8 space-y-6">
           {/* Logo and Title */}
@@ -41,9 +49,9 @@ const LoginForm = () => {
                 <MessageSquare className="w-8 h-8 text-primary-foreground" />
               </div>
             </div>
-            <h1 className="text-2xl font-bold text-foreground">Welcome Back</h1>
+            <h1 className="text-2xl font-bold text-foreground">{t('auth.welcomeBack')}</h1>
             <p className="text-muted-foreground mt-2">
-              Sign in to your Gemini CLI UI account
+              {t('auth.signInTitle')}
             </p>
           </div>
 
@@ -51,7 +59,7 @@ const LoginForm = () => {
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label htmlFor="username" className="block text-sm font-medium text-foreground mb-1">
-                Username
+                {t('auth.username')}
               </label>
               <input
                 type="text"
@@ -59,7 +67,7 @@ const LoginForm = () => {
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 className="w-full px-3 py-2 border border-border rounded-md bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Enter your username"
+                placeholder={t('auth.usernamePlaceholder')}
                 required
                 disabled={isLoading}
               />
@@ -67,7 +75,7 @@ const LoginForm = () => {
 
             <div>
               <label htmlFor="password" className="block text-sm font-medium text-foreground mb-1">
-                Password
+                {t('auth.password')}
               </label>
               <input
                 type="password"
@@ -75,7 +83,7 @@ const LoginForm = () => {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full px-3 py-2 border border-border rounded-md bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Enter your password"
+                placeholder={t('auth.passwordPlaceholder')}
                 required
                 disabled={isLoading}
               />
@@ -92,13 +100,13 @@ const LoginForm = () => {
               disabled={isLoading}
               className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-medium py-2 px-4 rounded-md transition-colors duration-200"
             >
-              {isLoading ? 'Signing in...' : 'Sign In'}
+              {isLoading ? t('auth.signingIn') : t('auth.signIn')}
             </button>
           </form>
 
           <div className="text-center">
             <p className="text-sm text-muted-foreground">
-              Enter your credentials to access Gemini Code UI
+              {t('auth.signInSubtitle')}
             </p>
           </div>
         </div>

@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { useLanguage } from '../contexts/LanguageContext';
+import LanguageToggle from './LanguageToggle';
 import GeminiLogo from './GeminiLogo';
 
 const SetupForm = () => {
@@ -10,23 +12,24 @@ const SetupForm = () => {
   const [error, setError] = useState('');
   
   const { register } = useAuth();
+  const { t } = useLanguage();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
     
     if (password !== confirmPassword) {
-      setError('Passwords do not match');
+      setError(t('auth.passwordsDoNotMatch'));
       return;
     }
     
     if (username.length < 3) {
-      setError('Username must be at least 3 characters long');
+      setError(t('auth.usernameMinLength'));
       return;
     }
     
     if (password.length < 6) {
-      setError('Password must be at least 6 characters long');
+      setError(t('auth.passwordMinLength'));
       return;
     }
     
@@ -42,7 +45,12 @@ const SetupForm = () => {
   };
 
   return (
-    <div className="min-h-screen bg-background flex items-center justify-center p-4">
+    <div className="min-h-screen bg-background flex items-center justify-center p-4 relative">
+      {/* Top right language switch */}
+      <div className="absolute top-4 right-4">
+        <LanguageToggle />
+      </div>
+
       <div className="w-full max-w-md">
         <div className="bg-card rounded-lg shadow-lg border border-border p-8 space-y-6">
           {/* Logo and Title */}
@@ -50,9 +58,9 @@ const SetupForm = () => {
             <div className="flex justify-center mb-4">
               <GeminiLogo size={64} />
             </div>
-            <h1 className="text-2xl font-bold text-foreground">Welcome to Gemini CLI UI</h1>
+            <h1 className="text-2xl font-bold text-foreground">{t('auth.welcomeSetup')}</h1>
             <p className="text-muted-foreground mt-2">
-              Set up your account to get started
+              {t('auth.setupSubtitle')}
             </p>
           </div>
 
@@ -60,7 +68,7 @@ const SetupForm = () => {
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label htmlFor="username" className="block text-sm font-medium text-foreground mb-1">
-                Username
+                {t('auth.username')}
               </label>
               <input
                 type="text"
@@ -68,7 +76,7 @@ const SetupForm = () => {
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 className="w-full px-3 py-2 border border-border rounded-md bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Enter your username"
+                placeholder={t('auth.usernamePlaceholder')}
                 required
                 disabled={isLoading}
               />
@@ -76,7 +84,7 @@ const SetupForm = () => {
 
             <div>
               <label htmlFor="password" className="block text-sm font-medium text-foreground mb-1">
-                Password
+                {t('auth.password')}
               </label>
               <input
                 type="password"
@@ -84,7 +92,7 @@ const SetupForm = () => {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full px-3 py-2 border border-border rounded-md bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Enter your password"
+                placeholder={t('auth.passwordPlaceholder')}
                 required
                 disabled={isLoading}
               />
@@ -92,7 +100,7 @@ const SetupForm = () => {
 
             <div>
               <label htmlFor="confirmPassword" className="block text-sm font-medium text-foreground mb-1">
-                Confirm Password
+                {t('auth.confirmPassword')}
               </label>
               <input
                 type="password"
@@ -100,7 +108,7 @@ const SetupForm = () => {
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 className="w-full px-3 py-2 border border-border rounded-md bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Confirm your password"
+                placeholder={t('auth.confirmPasswordPlaceholder')}
                 required
                 disabled={isLoading}
               />
@@ -117,13 +125,13 @@ const SetupForm = () => {
               disabled={isLoading}
               className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-medium py-2 px-4 rounded-md transition-colors duration-200"
             >
-              {isLoading ? 'Setting up...' : 'Create Account'}
+              {isLoading ? t('auth.settingUp') : t('auth.createAccount')}
             </button>
           </form>
 
           <div className="text-center">
             <p className="text-sm text-muted-foreground">
-              This is a single-user system. Only one account can be created.
+              {t('auth.singleUserNotice')}
             </p>
           </div>
         </div>

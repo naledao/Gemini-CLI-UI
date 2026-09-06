@@ -99,6 +99,26 @@ const CodeBlock = ({ language, value, inline, isDarkMode, className }) => {
   );
 };
 
+// Normalize Markdown emphasis syntax: safely move any inner whitespace to outer side
+// to strictly conform to CommonMark flanking delimiter rules without corrupting emphasis
+const normalizeMarkdownEmphasis = (text) => {
+  if (!text) return '';
+  const parts = text.split(/(```[\s\S]*?```|`[^`]*?`)/g);
+  return parts.map((part, index) => {
+    // Odd indices are code blocks or inline code - don't modify
+    if (index % 2 === 1) return part;
+    
+    // Fix emphasis inner spaces (e.g. "** text **" -> " **text** ", "**text **" -> "**text** ")
+    return part.replace(/\*\*([^*\n]+?)\*\*/g, (match, inner) => {
+      const trimmed = inner.trim();
+      if (!trimmed) return match;
+      const leadingSpace = inner.startsWith(' ') ? ' ' : '';
+      const trailingSpace = inner.endsWith(' ') ? ' ' : '';
+      return `${leadingSpace}**${trimmed}**${trailingSpace}`;
+    });
+  }).join('');
+};
+
 export const MessageRenderer = ({ content, isDarkMode = true }) => {
   // Filter out "Error: Loaded cached credentials" messages
   let filteredContent = content?.replace(/^Error:\s*Loaded cached credentials\.?\s*\n?/gim, '');
@@ -120,22 +140,19 @@ export const MessageRenderer = ({ content, isDarkMode = true }) => {
       .trim();
   }
 
+  filteredContent = normalizeMarkdownEmphasis(filteredContent);
+
   return (
     <div className="prose prose-sm max-w-none dark:prose-invert prose-gray leading-normal">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
         components={{
-          code: ({ node, inline, className, children, ...props }) => {
-            // For inline code, just render simple styled code
-            if (inline) {
-              return (
-                <code className="px-1.5 py-0.5 mx-0.5 bg-gray-100 dark:bg-gray-800 text-blue-600 dark:text-blue-400 rounded text-sm font-mono">
-                  {children}
-                </code>
-              );
-            }
-            // Block code is handled by the pre component
-            return <>{children}</>;
+          code: ({ node, className, children, ...props }) => {
+            return (
+              <code className="px-1.5 py-0.5 mx-0.5 bg-gray-100 dark:bg-gray-800 text-blue-600 dark:text-blue-400 rounded text-sm font-mono break-words font-normal">
+                {children}
+              </code>
+            );
           },
           pre: ({ node, children, ...props }) => {
             // Extract the code content from pre > code structure

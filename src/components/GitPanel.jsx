@@ -2,8 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { GitBranch, GitCommit, Plus, Minus, RefreshCw, Check, X, ChevronDown, ChevronRight, Info, History, FileText, Mic, MicOff, Sparkles, Download, RotateCcw, Trash2, AlertTriangle, Upload } from 'lucide-react';
 import { MicButton } from './MicButton.jsx';
 import { authenticatedFetch } from '../utils/api';
+import { useLanguage } from '../contexts/LanguageContext';
 
 function GitPanel({ selectedProject, isMobile }) {
+  const { t, language } = useLanguage();
   const [gitStatus, setGitStatus] = useState(null);
   const [gitDiff, setGitDiff] = useState({});
   const [isLoading, setIsLoading] = useState(false);
@@ -638,7 +640,7 @@ function GitPanel({ selectedProject, isMobile }) {
   if (!selectedProject) {
     return (
       <div className="h-full flex items-center justify-center text-gray-500 dark:text-gray-400">
-        <p>Select a project to view source control</p>
+        <p>{t('git.selectProjectPrompt')}</p>
       </div>
     );
   }
@@ -707,7 +709,7 @@ function GitPanel({ selectedProject, isMobile }) {
                   className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
                 >
                   <Plus className="w-3 h-3" />
-                  <span>Create new branch</span>
+                  <span>{t('git.createNewBranch')}</span>
                 </button>
               </div>
             </div>
@@ -811,7 +813,7 @@ function GitPanel({ selectedProject, isMobile }) {
             >
               <div className="flex items-center justify-center gap-2">
                 <FileText className="w-4 h-4" />
-                <span>Changes</span>
+                <span>{t('git.changes')}</span>
               </div>
             </button>
             <button
@@ -824,7 +826,7 @@ function GitPanel({ selectedProject, isMobile }) {
             >
               <div className="flex items-center justify-center gap-2">
                 <History className="w-4 h-4" />
-                <span>History</span>
+                <span>{t('git.history')}</span>
               </div>
             </button>
           </div>
@@ -856,7 +858,7 @@ function GitPanel({ selectedProject, isMobile }) {
                     {/* Mobile collapse button */}
                     {isMobile && (
                       <div className="flex items-center justify-between mb-2">
-                        <span className="text-sm font-medium">Commit Changes</span>
+                        <span className="text-sm font-medium">{t('git.commitChanges')}</span>
                         <button
                           onClick={() => setIsCommitAreaCollapsed(true)}
                           className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"
@@ -871,7 +873,7 @@ function GitPanel({ selectedProject, isMobile }) {
                         ref={textareaRef}
                         value={commitMessage}
                         onChange={(e) => setCommitMessage(e.target.value)}
-                        placeholder="Message (Ctrl+Enter to commit)"
+                        placeholder={language === 'zh' ? '提交说明 (Ctrl+Enter 提交)' : 'Message (Ctrl+Enter to commit)'}
                         className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 resize-none pr-20"
                         rows="3"
                         onKeyDown={(e) => {
@@ -885,7 +887,7 @@ function GitPanel({ selectedProject, isMobile }) {
                           onClick={generateCommitMessage}
                           disabled={selectedFiles.size === 0 || isGeneratingMessage}
                           className="p-1.5 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                          title="Generate commit message"
+                          title={language === 'zh' ? 'AI 自动生成提交说明' : 'Generate commit message'}
                         >
                           {isGeneratingMessage ? (
                             <RefreshCw className="w-4 h-4 animate-spin" />
@@ -904,7 +906,9 @@ function GitPanel({ selectedProject, isMobile }) {
                     </div>
                     <div className="flex items-center justify-between mt-2">
                       <span className="text-xs text-gray-500">
-                        {selectedFiles.size} file{selectedFiles.size !== 1 ? 's' : ''} selected
+                        {language === 'zh' 
+                          ? `已选择 ${selectedFiles.size} 个文件` 
+                          : `${selectedFiles.size} file${selectedFiles.size !== 1 ? 's' : ''} selected`}
                       </span>
                       <button
                         onClick={() => setConfirmAction({ 
@@ -1127,9 +1131,9 @@ function GitPanel({ selectedProject, isMobile }) {
                   }`} />
                 </div>
                 <h3 className="text-lg font-semibold">
-                  {confirmAction.type === 'discard' ? 'Discard Changes' : 
-                   confirmAction.type === 'commit' ? 'Confirm Commit' : 
-                   confirmAction.type === 'pull' ? 'Confirm Pull' : 'Confirm Push'}
+                  {confirmAction.type === 'discard' ? (language === 'zh' ? '放弃更改' : 'Discard Changes') : 
+                   confirmAction.type === 'commit' ? (language === 'zh' ? '确认提交' : 'Confirm Commit') : 
+                   confirmAction.type === 'pull' ? (language === 'zh' ? '确认拉取' : 'Confirm Pull') : (language === 'zh' ? '确认推送' : 'Confirm Push')}
                 </h3>
               </div>
               
@@ -1142,7 +1146,7 @@ function GitPanel({ selectedProject, isMobile }) {
                   onClick={() => setConfirmAction(null)}
                   className="px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md"
                 >
-                  Cancel
+                  {t('common.cancel')}
                 </button>
                 <button
                   onClick={confirmAndExecute}
@@ -1159,22 +1163,22 @@ function GitPanel({ selectedProject, isMobile }) {
                   {confirmAction.type === 'discard' ? (
                     <>
                       <Trash2 className="w-4 h-4" />
-                      <span>Discard</span>
+                      <span>{t('git.discard')}</span>
                     </>
                   ) : confirmAction.type === 'commit' ? (
                     <>
                       <Check className="w-4 h-4" />
-                      <span>Commit</span>
+                      <span>{t('git.commit')}</span>
                     </>
                   ) : confirmAction.type === 'pull' ? (
                     <>
                       <Download className="w-4 h-4" />
-                      <span>Pull</span>
+                      <span>{t('git.pull')}</span>
                     </>
                   ) : (
                     <>
                       <Upload className="w-4 h-4" />
-                      <span>Push</span>
+                      <span>{t('git.push')}</span>
                     </>
                   )}
                 </button>

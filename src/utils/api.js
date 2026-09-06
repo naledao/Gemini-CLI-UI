@@ -63,6 +63,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path }),
     }),
+  getDirectories: (searchPath = '') =>
+    authenticatedFetch(`/api/filesystem/directories?path=${encodeURIComponent(searchPath)}`),
   readFile: (projectName, filePath) =>
     authenticatedFetch(`/api/projects/${projectName}/file?filePath=${encodeURIComponent(filePath)}`),
   saveFile: (projectName, filePath, content) =>
@@ -71,7 +73,7 @@ export const api = {
       body: JSON.stringify({ filePath, content }),
     }),
   getFiles: (projectName) =>
-    authenticatedFetch(`/api/projects/${projectName}/files`),
+    authenticatedFetch(`/api/projects/${encodeURIComponent(projectName)}/files`),
   transcribe: (formData) =>
     authenticatedFetch('/api/transcribe', {
       method: 'POST',

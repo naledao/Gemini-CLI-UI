@@ -10,9 +10,14 @@ export default defineConfig(({ command, mode }) => {
     plugins: [react()],
     server: {
       port: parseInt(env.VITE_PORT) || 4009,
+      allowedHosts: true,
       proxy: {
         '/api': `http://localhost:${env.PORT || 4008}`,
         '/ws': {
+          target: `ws://localhost:${env.PORT || 4008}`,
+          ws: true
+        },
+        '/shell': {
           target: `ws://localhost:${env.PORT || 4008}`,
           ws: true
         }

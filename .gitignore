@@ -132,3 +132,7 @@ TestApp.jsx
 projects_data/
 session_data/
 user_uploads/
+
+# Binary build outputs and temporary assets
+bin/
+/image.png

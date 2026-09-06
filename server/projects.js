@@ -72,7 +72,18 @@ async function extractProjectDirectory(projectName) {
     return projectDirectoryCache.get(projectName);
   }
   
-  
+  // 1. First priority: Check if project has an originalPath configured in project-config.json
+  try {
+    const config = await loadProjectConfig();
+    if (config && config[projectName] && config[projectName].originalPath) {
+      const orig = config[projectName].originalPath.replace(/[^\x20-\x7E]/g, '').trim();
+      projectDirectoryCache.set(projectName, orig);
+      return orig;
+    }
+  } catch (err) {
+    // Continue to session/decoding extraction
+  }
+
   const projectDir = path.join(process.env.HOME, '.gemini', 'projects', projectName);
   const cwdCounts = new Map();
   let latestTimestamp = 0;
@@ -85,16 +96,22 @@ async function extractProjectDirectory(projectName) {
     
     if (jsonlFiles.length === 0) {
       // Fall back to decoded project name if no sessions
-      // First try to decode from base64
+      // First try to decode from base64 safely
       try {
-        // Handle custom padding: __ at the end should be replaced with ==
-        let base64Name = projectName.replace(/_/g, '+').replace(/-/g, '/');
-        if (base64Name.endsWith('++')) {
-          base64Name = base64Name.slice(0, -2) + '==';
+        let b64 = projectName;
+        // Replace custom padding back to =
+        while (b64.endsWith('_')) {
+          b64 = b64.slice(0, -1) + '=';
         }
-        extractedPath = Buffer.from(base64Name, 'base64').toString('utf8');
-        // Clean the path by removing any non-printable characters
+        b64 = b64.replace(/_/g, '/').replace(/-/g, '+');
+        while (b64.length % 4 !== 0) {
+          b64 += '=';
+        }
+        extractedPath = Buffer.from(b64, 'base64').toString('utf8');
         extractedPath = extractedPath.replace(/[^\x20-\x7E]/g, '').trim();
+        if (!extractedPath.startsWith('/')) {
+          extractedPath = projectName.replace(/-/g, '/');
+        }
       } catch (e) {
         // If base64 decode fails, use old method
         extractedPath = projectName.replace(/-/g, '/');

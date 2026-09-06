@@ -4,19 +4,22 @@ import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Input } from './ui/input';
 
-import { FolderOpen, Folder, Plus, MessageSquare, Clock, ChevronDown, ChevronRight, Edit3, Check, X, Trash2, Settings, FolderPlus, RefreshCw, Sparkles, Edit2, Star, Search } from 'lucide-react';
+import { FolderOpen, Folder, Plus, MessageSquare, Clock, ChevronDown, ChevronRight, Edit3, Check, X, Trash2, Settings, FolderPlus, RefreshCw, Sparkles, Edit2, Star, Search, CornerDownLeft, PanelLeftClose } from 'lucide-react';
 import { cn } from '../lib/utils';
 import GeminiLogo from './GeminiLogo';
 import { api } from '../utils/api';
+import { useLanguage } from '../contexts/LanguageContext';
+import LanguageToggle from './LanguageToggle';
+import DirectoryAutocomplete from './DirectoryAutocomplete';
 
 // Move formatTimeAgo outside component to avoid recreation on every render
-const formatTimeAgo = (dateString, currentTime) => {
+const formatTimeAgo = (dateString, currentTime, t, language) => {
   const date = new Date(dateString);
   const now = currentTime;
   
   // Check if date is valid
   if (isNaN(date.getTime())) {
-    return 'Unknown';
+    return t ? t('common.unknown') : 'Unknown';
   }
   
   const diffInMs = now - date;
@@ -25,14 +28,11 @@ const formatTimeAgo = (dateString, currentTime) => {
   const diffInHours = Math.floor(diffInMs / (1000 * 60 * 60));
   const diffInDays = Math.floor(diffInMs / (1000 * 60 * 60 * 24));
   
-  if (diffInSeconds < 60) return 'Just now';
-  if (diffInMinutes === 1) return '1 min ago';
-  if (diffInMinutes < 60) return `${diffInMinutes} mins ago`;
-  if (diffInHours === 1) return '1 hour ago';
-  if (diffInHours < 24) return `${diffInHours} hours ago`;
-  if (diffInDays === 1) return '1 day ago';
-  if (diffInDays < 7) return `${diffInDays} days ago`;
-  return date.toLocaleDateString();
+  if (diffInSeconds < 60) return t ? t('common.justNow') : 'Just now';
+  if (diffInMinutes < 60) return t ? t('common.minutesAgo', { count: diffInMinutes }) : `${diffInMinutes} mins ago`;
+  if (diffInHours < 24) return t ? t('common.hoursAgo', { count: diffInHours }) : `${diffInHours} hours ago`;
+  if (diffInDays < 7) return t ? t('common.daysAgo', { count: diffInDays }) : `${diffInDays} days ago`;
+  return date.toLocaleDateString(language === 'zh' ? 'zh-CN' : 'en-US');
 };
 
 function Sidebar({ 
@@ -50,8 +50,12 @@ function Sidebar({
   updateAvailable,
   latestVersion,
   currentVersion,
-  onShowVersionModal
+  onShowVersionModal,
+  onToggleCollapse,
+  isCollapsed,
+  onCloseMobile
 }) {
+  const { t, language } = useLanguage();
   const [expandedProjects, setExpandedProjects] = useState(new Set());
   const [editingProject, setEditingProject] = useState(null);
   const [showNewProject, setShowNewProject] = useState(false);
@@ -68,6 +72,61 @@ function Sidebar({
   const [editingSessionName, setEditingSessionName] = useState('');
   const [generatingSummary, setGeneratingSummary] = useState({});
   const [searchFilter, setSearchFilter] = useState('');
+  const [fsDirectories, setFsDirectories] = useState([]);
+  const [fsLoading, setFsLoading] = useState(false);
+
+  // Filesystem suggestions when searching with a path like /root or ~
+  useEffect(() => {
+    const trimmed = searchFilter.trim();
+    if (trimmed.startsWith('/') || trimmed.startsWith('~') || trimmed.startsWith('.')) {
+      setFsLoading(true);
+      const timer = setTimeout(async () => {
+        try {
+          const res = await api.getDirectories(trimmed);
+          if (res.ok) {
+            const data = await res.json();
+            setFsDirectories(data.directories || []);
+          } else {
+            setFsDirectories([]);
+          }
+        } catch (e) {
+          setFsDirectories([]);
+        } finally {
+          setFsLoading(false);
+        }
+      }, 150);
+      return () => clearTimeout(timer);
+    } else {
+      setFsDirectories([]);
+      setFsLoading(false);
+    }
+  }, [searchFilter]);
+
+  const handleSelectFsDirectory = async (dirPath) => {
+    const normalized = dirPath.endsWith('/') ? dirPath.slice(0, -1) : dirPath;
+    const existing = projects.find(p => p.path === normalized || p.path === dirPath);
+    if (existing) {
+      onProjectSelect(existing);
+      setSearchFilter('');
+      return;
+    }
+
+    try {
+      const response = await api.createProject(normalized);
+      if (response.ok) {
+        const result = await response.json();
+        setSearchFilter('');
+        if (onRefresh) await onRefresh();
+        if (result.project) {
+          onProjectSelect(result.project);
+        }
+      } else {
+        alert(t('common.error'));
+      }
+    } catch (e) {
+      alert(t('common.error'));
+    }
+  };
 
   
   // Starred projects state - persisted in localStorage
@@ -277,7 +336,7 @@ function Sidebar({
   };
 
   const deleteSession = async (projectName, sessionId) => {
-    if (!confirm('Are you sure you want to delete this session? This action cannot be undone.')) {
+    if (!confirm(t('sidebar.deleteSessionConfirm'))) {
       return;
     }
 
@@ -291,16 +350,16 @@ function Sidebar({
         }
       } else {
         console.error('Failed to delete session');
-        alert('Failed to delete session. Please try again.');
+        alert(t('common.error'));
       }
     } catch (error) {
       console.error('Error deleting session:', error);
-      alert('Error deleting session. Please try again.');
+      alert(t('common.error'));
     }
   };
 
   const deleteProject = async (projectName) => {
-    if (!confirm('Are you sure you want to delete this empty project? This action cannot be undone.')) {
+    if (!confirm(t('sidebar.deleteProjectConfirm', { name: projectName }))) {
       return;
     }
 
@@ -315,17 +374,17 @@ function Sidebar({
       } else {
         const error = await response.json();
         console.error('Failed to delete project');
-        alert(error.error || 'Failed to delete project. Please try again.');
+        alert(error.error || t('common.error'));
       }
     } catch (error) {
       console.error('Error deleting project:', error);
-      alert('Error deleting project. Please try again.');
+      alert(t('common.error'));
     }
   };
 
   const createNewProject = async () => {
     if (!newProjectPath.trim()) {
-      alert('Please enter a project path');
+      alert(t('sidebar.enterProjectPath'));
       return;
     }
 
@@ -420,15 +479,15 @@ function Sidebar({
               <MessageSquare className="w-4 h-4 text-primary-foreground" />
             </div>
             <div>
-              <h1 className="text-lg font-bold text-foreground">Gemini CLI UI</h1>
-              <p className="text-sm text-muted-foreground">AI coding assistant interface</p>
+              <h1 className="text-lg font-bold text-foreground">{t('sidebar.title')}</h1>
+              <p className="text-sm text-muted-foreground">{t('sidebar.subtitle')}</p>
             </div>
           </div>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-1.5">
             <Button
               variant="ghost"
               size="sm"
-              className="h-9 w-9 px-0 hover:bg-accent transition-colors duration-200 group"
+              className="h-8 w-8 px-0 hover:bg-accent transition-colors duration-200 group"
               onClick={async () => {
                 setIsRefreshing(true);
                 try {
@@ -438,19 +497,30 @@ function Sidebar({
                 }
               }}
               disabled={isRefreshing}
-              title="Refresh projects and sessions (Ctrl+R)"
+              title={`${t('common.refresh')} (Ctrl+R)`}
             >
               <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''} group-hover:rotate-180 transition-transform duration-300`} />
             </Button>
             <Button
               variant="default"
               size="sm"
-              className="h-9 w-9 px-0 bg-primary hover:bg-primary/90 transition-all duration-200 shadow-sm hover:shadow-md"
+              className="h-8 w-8 px-0 bg-primary hover:bg-primary/90 transition-all duration-200 shadow-sm hover:shadow-md"
               onClick={() => setShowNewProject(true)}
-              title="Create new project (Ctrl+N)"
+              title={`${t('sidebar.newProject')} (Ctrl+N)`}
             >
               <FolderPlus className="w-4 h-4" />
             </Button>
+            {onToggleCollapse && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 w-8 px-0 hover:bg-accent transition-colors duration-200 text-muted-foreground hover:text-foreground"
+                onClick={onToggleCollapse}
+                title={`${t('sidebar.collapseSidebar')} (Ctrl+B)`}
+              >
+                <PanelLeftClose className="w-4 h-4" />
+              </Button>
+            )}
           </div>
         </div>
         
@@ -462,11 +532,11 @@ function Sidebar({
                 <MessageSquare className="w-4 h-4 text-primary-foreground" />
               </div>
               <div>
-                <h1 className="text-lg font-semibold text-foreground">Gemini CLI UI</h1>
-                <p className="text-sm text-muted-foreground">Projects</p>
+                <h1 className="text-lg font-semibold text-foreground">{t('sidebar.title')}</h1>
+                <p className="text-sm text-muted-foreground">{t('sidebar.projects')}</p>
               </div>
             </div>
-            <div className="flex gap-2">
+            <div className="flex items-center gap-1.5">
               <button
                 className="w-8 h-8 rounded-md bg-background border border-border flex items-center justify-center active:scale-95 transition-all duration-150"
                 onClick={async () => {
@@ -478,15 +548,26 @@ function Sidebar({
                   }
                 }}
                 disabled={isRefreshing}
+                title={t('common.refresh')}
               >
                 <RefreshCw className={`w-4 h-4 text-foreground ${isRefreshing ? 'animate-spin' : ''}`} />
               </button>
               <button
                 className="w-8 h-8 rounded-md bg-primary text-primary-foreground flex items-center justify-center active:scale-95 transition-all duration-150"
                 onClick={() => setShowNewProject(true)}
+                title={t('sidebar.newProject')}
               >
                 <FolderPlus className="w-4 h-4" />
               </button>
+              {onCloseMobile && (
+                <button
+                  className="w-8 h-8 rounded-md bg-background border border-border flex items-center justify-center active:scale-95 transition-all duration-150 text-muted-foreground hover:text-foreground"
+                  onClick={onCloseMobile}
+                  title={t('common.close')}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -499,14 +580,14 @@ function Sidebar({
           <div className="hidden md:block space-y-2">
             <div className="flex items-center gap-2 text-sm font-medium text-foreground">
               <FolderPlus className="w-4 h-4" />
-              Create New Project
+              {t('sidebar.newProject')}
             </div>
             <div className="space-y-2">
-              <Input
+              <DirectoryAutocomplete
                 value={newProjectPath}
-                onChange={(e) => setNewProjectPath(e.target.value)}
-                placeholder="/path/to/project or new/folder/name"
-                className="text-sm focus:ring-2 focus:ring-primary/20"
+                onChange={setNewProjectPath}
+                placeholder={t('sidebar.projectPathPlaceholder')}
+                className="w-full px-3 py-1.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/20"
                 autoFocus
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') createNewProject();
@@ -515,7 +596,7 @@ function Sidebar({
               />
               {newProjectPath.trim() && (
                 <div className="text-xs text-muted-foreground italic">
-                  💡 Folder will be created if it doesn't exist
+                  💡 {language === 'zh' ? '如果目录不存在将自动创建' : "Folder will be created if it doesn't exist"}
                 </div>
               )}
             </div>
@@ -526,7 +607,7 @@ function Sidebar({
                 disabled={!newProjectPath.trim() || creatingProject}
                 className="flex-1 h-8 text-xs hover:bg-primary/90 transition-colors"
               >
-                {creatingProject ? 'Creating...' : 'Create Project'}
+                {creatingProject ? t('sidebar.creating') : t('sidebar.createProject')}
               </Button>
               <Button
                 size="sm"
@@ -535,7 +616,7 @@ function Sidebar({
                 disabled={creatingProject}
                 className="h-8 text-xs hover:bg-accent transition-colors"
               >
-                Cancel
+                {t('common.cancel')}
               </Button>
             </div>
           </div>
@@ -549,7 +630,7 @@ function Sidebar({
                     <FolderPlus className="w-3 h-3 text-primary" />
                   </div>
                   <div>
-                    <h2 className="text-base font-semibold text-foreground">New Project</h2>
+                    <h2 className="text-base font-semibold text-foreground">{t('sidebar.newProject')}</h2>
                   </div>
                 </div>
                 <button
@@ -563,11 +644,11 @@ function Sidebar({
               
               <div className="space-y-3">
                 <div>
-                  <Input
+                  <DirectoryAutocomplete
                     value={newProjectPath}
-                    onChange={(e) => setNewProjectPath(e.target.value)}
-                    placeholder="/path/to/project or new/folder/name"
-                    className="text-sm h-10 rounded-md focus:border-primary transition-colors"
+                    onChange={setNewProjectPath}
+                    placeholder={t('sidebar.projectPathPlaceholder')}
+                    className="w-full px-3 py-2 text-sm h-10 rounded-md border border-input bg-background focus:outline-none focus:border-primary"
                     autoFocus
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') createNewProject();
@@ -576,7 +657,7 @@ function Sidebar({
                   />
                   {newProjectPath.trim() && (
                     <div className="text-xs text-muted-foreground italic mt-2">
-                      💡 Folder will be created if it doesn't exist
+                      💡 {language === 'zh' ? '如果目录不存在将自动创建' : "Folder will be created if it doesn't exist"}
                     </div>
                   )}
                 </div>
@@ -588,14 +669,14 @@ function Sidebar({
                     variant="outline"
                     className="flex-1 h-9 text-sm rounded-md active:scale-95 transition-transform"
                   >
-                    Cancel
+                    {t('common.cancel')}
                   </Button>
                   <Button
                     onClick={createNewProject}
                     disabled={!newProjectPath.trim() || creatingProject}
                     className="flex-1 h-9 text-sm rounded-md bg-primary hover:bg-primary/90 active:scale-95 transition-all"
                   >
-                    {creatingProject ? 'Creating...' : 'Create'}
+                    {creatingProject ? t('sidebar.creating') : t('sidebar.create')}
                   </Button>
                 </div>
               </div>
@@ -609,12 +690,12 @@ function Sidebar({
       
       {/* Search Filter */}
       {projects.length > 0 && !isLoading && (
-        <div className="px-3 md:px-4 py-2 border-b border-border">
+        <div className="px-3 md:px-4 py-2 border-b border-border relative">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <Input
               type="text"
-              placeholder="Search projects..."
+              placeholder={t('sidebar.searchProjects')}
               value={searchFilter}
               onChange={(e) => setSearchFilter(e.target.value)}
               className="pl-9 h-9 text-sm bg-muted/50 border-0 focus:bg-background focus:ring-1 focus:ring-primary/20"
@@ -628,6 +709,66 @@ function Sidebar({
               </button>
             )}
           </div>
+
+          {/* Filesystem Subdirectory Autocomplete dropdown when typing a path */}
+          {(searchFilter.trim().startsWith('/') || searchFilter.trim().startsWith('~') || searchFilter.trim().startsWith('.')) && (
+            <div className="absolute left-3 right-3 top-full mt-1 bg-popover text-popover-foreground border border-border rounded-lg shadow-2xl z-50 overflow-hidden max-h-72 flex flex-col animate-in fade-in-0 zoom-in-95 duration-100">
+              <div className="px-3 py-1.5 bg-muted/70 border-b border-border text-[11px] font-mono text-muted-foreground flex items-center justify-between">
+                <span className="truncate">{language === 'zh' ? '目录智能补全与选择：' : 'Directory autocomplete:'}</span>
+                {fsLoading && <span className="text-[10px] animate-pulse">{t('common.loading')}</span>}
+              </div>
+
+              {/* Quick option to select current typed path as project */}
+              <div
+                onClick={() => handleSelectFsDirectory(searchFilter.trim())}
+                className="px-3 py-2 text-xs flex items-center justify-between cursor-pointer bg-primary/10 hover:bg-primary/20 text-primary font-medium transition-colors border-b border-border/40"
+              >
+                <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
+                  <FolderOpen className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+                  <span className="font-mono truncate">{language === 'zh' ? '将当前路径作为项目' : 'Use path as project'}: {searchFilter.trim()}</span>
+                </div>
+                <CornerDownLeft className="w-3 h-3 flex-shrink-0 ml-1" />
+              </div>
+
+              <div className="overflow-y-auto max-h-52 divide-y divide-border/30">
+                {fsDirectories.length > 0 ? (
+                  fsDirectories.map(dir => (
+                    <div
+                      key={dir.path}
+                      className="px-3 py-2 text-xs flex items-center justify-between hover:bg-muted/80 text-foreground transition-colors group"
+                    >
+                      <div 
+                        className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer truncate"
+                        onClick={() => handleSelectFsDirectory(dir.path)}
+                        title={language === 'zh' ? `点击进入此项目: ${dir.path}` : `Click to open project: ${dir.path}`}
+                      >
+                        <Folder className="w-3.5 h-3.5 text-blue-500 flex-shrink-0" />
+                        <span className="font-mono truncate group-hover:text-primary font-medium">{dir.name}</span>
+                      </div>
+                      
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setSearchFilter(`${dir.path}/`);
+                        }}
+                        className="p-1 text-muted-foreground hover:text-foreground hover:bg-accent rounded text-[11px] flex items-center gap-0.5 ml-2 flex-shrink-0 cursor-pointer"
+                        title={language === 'zh' ? '进入下级子目录' : 'Enter subdirectories'}
+                      >
+                        <span className="text-[10px] opacity-70">下级</span>
+                        <ChevronRight className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))
+                ) : !fsLoading ? (
+                  <div className="px-3 py-3 text-xs text-muted-foreground text-center">
+                    {language === 'zh' ? '该目录下无子文件夹' : 'No subdirectories found'}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )}
         </div>
       )}
       
@@ -649,9 +790,9 @@ function Sidebar({
               <div className="w-12 h-12 bg-muted rounded-lg flex items-center justify-center mx-auto mb-4 md:mb-3">
                 <Folder className="w-6 h-6 text-muted-foreground" />
               </div>
-              <h3 className="text-base font-medium text-foreground mb-2 md:mb-1">No projects found</h3>
+              <h3 className="text-base font-medium text-foreground mb-2 md:mb-1">{t('sidebar.noProjects')}</h3>
               <p className="text-sm text-muted-foreground">
-                Run Gemini CLI in a project directory to get started
+                {language === 'zh' ? '在项目目录中运行 Gemini CLI 开始使用' : 'Run Gemini CLI in a project directory to get started'}
               </p>
             </div>
           ) : filteredProjects.length === 0 ? (
@@ -659,9 +800,9 @@ function Sidebar({
               <div className="w-12 h-12 bg-muted rounded-lg flex items-center justify-center mx-auto mb-4 md:mb-3">
                 <Search className="w-6 h-6 text-muted-foreground" />
               </div>
-              <h3 className="text-base font-medium text-foreground mb-2 md:mb-1">No matching projects</h3>
+              <h3 className="text-base font-medium text-foreground mb-2 md:mb-1">{language === 'zh' ? '未找到匹配的项目' : 'No matching projects'}</h3>
               <p className="text-sm text-muted-foreground">
-                Try adjusting your search term
+                {language === 'zh' ? '请尝试调整搜索关键词' : 'Try adjusting your search term'}
               </p>
             </div>
           ) : (
@@ -707,7 +848,7 @@ function Sidebar({
                                   value={editingName}
                                   onChange={(e) => setEditingName(e.target.value)}
                                   className="w-full px-3 py-2 text-sm border-2 border-primary/40 focus:border-primary rounded-lg bg-background text-foreground shadow-sm focus:shadow-md transition-all duration-200 focus:outline-none"
-                                  placeholder="Project name"
+                                  placeholder={t('sidebar.projectNamePlaceholder')}
                                   autoFocus
                                   autoComplete="off"
                                   onClick={(e) => e.stopPropagation()}
@@ -731,7 +872,7 @@ function Sidebar({
                                       const sessionCount = getAllSessions(project).length;
                                       const hasMore = project.sessionMeta?.hasMore !== false;
                                       const count = hasMore && sessionCount >= 5 ? `${sessionCount}+` : sessionCount;
-                                      return `${count} session${count === 1 ? '' : 's'}`;
+                                      return t('sidebar.sessionCount', { count });
                                     })()}
                                   </p>
                                 </>
@@ -985,7 +1126,7 @@ function Sidebar({
                         ))
                       ) : getAllSessions(project).length === 0 && !loadingSessions[project.name] ? (
                         <div className="py-2 px-3 text-left">
-                          <p className="text-xs text-muted-foreground">No sessions yet</p>
+                          <p className="text-xs text-muted-foreground">{t('sidebar.noSessions')}</p>
                         </div>
                       ) : (
                         getAllSessions(project).map((session) => {
@@ -1031,12 +1172,12 @@ function Sidebar({
                                   </div>
                                   <div className="min-w-0 flex-1">
                                     <div className="text-xs font-medium truncate text-foreground">
-                                      {session.summary || 'New Session'}
+                                      {session.summary || t('sidebar.newSession')}
                                     </div>
                                     <div className="flex items-center gap-1 mt-0.5">
                                       <Clock className="w-2.5 h-2.5 text-muted-foreground" />
                                       <span className="text-xs text-muted-foreground">
-                                        {formatTimeAgo(session.lastActivity, currentTime)}
+                                        {formatTimeAgo(session.lastActivity, currentTime, t, language)}
                                       </span>
                                       {session.messageCount > 0 && (
                                         <Badge variant="secondary" className="text-xs px-1 py-0 ml-auto">
@@ -1075,12 +1216,12 @@ function Sidebar({
                                   <MessageSquare className="w-3 h-3 text-muted-foreground mt-0.5 flex-shrink-0" />
                                   <div className="min-w-0 flex-1">
                                     <div className="text-xs font-medium truncate text-foreground">
-                                      {session.summary || 'New Session'}
+                                      {session.summary || t('sidebar.newSession')}
                                     </div>
                                     <div className="flex items-center gap-1 mt-0.5">
                                       <Clock className="w-2.5 h-2.5 text-muted-foreground" />
                                       <span className="text-xs text-muted-foreground">
-                                        {formatTimeAgo(session.lastActivity, currentTime)}
+                                        {formatTimeAgo(session.lastActivity, currentTime, t, language)}
                                       </span>
                                       {session.messageCount > 0 && (
                                         <Badge variant="secondary" className="text-xs px-1 py-0 ml-auto">
@@ -1196,12 +1337,12 @@ function Sidebar({
                           {loadingSessions[project.name] ? (
                             <>
                               <div className="w-3 h-3 animate-spin rounded-full border border-muted-foreground border-t-transparent" />
-                              Loading...
+                              {t('common.loading')}
                             </>
                           ) : (
                             <>
                               <ChevronDown className="w-3 h-3" />
-                              Show more sessions
+                              {language === 'zh' ? '加载更多对话' : 'Show more sessions'}
                             </>
                           )}
                         </Button>
@@ -1217,7 +1358,7 @@ function Sidebar({
                           }}
                         >
                           <Plus className="w-3 h-3" />
-                          New Session
+                          {t('sidebar.newSession')}
                         </button>
                       </div>
                       
@@ -1228,7 +1369,7 @@ function Sidebar({
                         onClick={() => onNewSession(project)}
                       >
                         <Plus className="w-3 h-3" />
-                        New Session
+                        {t('sidebar.newSession')}
                       </Button>
                     </div>
                   )}
@@ -1256,8 +1397,12 @@ function Sidebar({
                 <div className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
               </div>
               <div className="min-w-0 flex-1">
-                <div className="text-sm font-medium text-blue-700 dark:text-blue-300">Update Available</div>
-                <div className="text-xs text-blue-600 dark:text-blue-400">Version {latestVersion} is ready</div>
+                <div className="text-sm font-medium text-blue-700 dark:text-blue-300">
+                  {language === 'zh' ? '发现新版本' : 'Update Available'}
+                </div>
+                <div className="text-xs text-blue-600 dark:text-blue-400">
+                  {language === 'zh' ? `版本 ${latestVersion} 已就绪` : `Version ${latestVersion} is ready`}
+                </div>
               </div>
             </Button>
           </div>
@@ -1275,8 +1420,12 @@ function Sidebar({
                 <div className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
               </div>
               <div className="min-w-0 flex-1 text-left">
-                <div className="text-sm font-medium text-blue-700 dark:text-blue-300">Update Available</div>
-                <div className="text-xs text-blue-600 dark:text-blue-400">Version {latestVersion} is ready</div>
+                <div className="text-sm font-medium text-blue-700 dark:text-blue-300">
+                  {language === 'zh' ? '发现新版本' : 'Update Available'}
+                </div>
+                <div className="text-xs text-blue-600 dark:text-blue-400">
+                  {language === 'zh' ? `版本 ${latestVersion} 已就绪` : `Version ${latestVersion} is ready`}
+                </div>
               </div>
             </button>
           </div>
@@ -1286,7 +1435,11 @@ function Sidebar({
       {/* Settings Section */}
       <div className="md:p-2 md:border-t md:border-border flex-shrink-0">
         {/* Mobile Settings */}
-        <div className="md:hidden p-4 pb-20 border-t border-border/50">
+        <div className="md:hidden p-4 pb-20 border-t border-border/50 space-y-2">
+          <div className="flex items-center justify-between px-2">
+            <span className="text-xs text-muted-foreground">{t('quickSettings.language')}</span>
+            <LanguageToggle />
+          </div>
           <button
             className="w-full h-14 bg-muted/50 hover:bg-muted/70 rounded-2xl flex items-center justify-start gap-4 px-4 active:scale-[0.98] transition-all duration-150"
             onClick={onShowSettings}
@@ -1294,19 +1447,22 @@ function Sidebar({
             <div className="w-10 h-10 rounded-2xl bg-background/80 flex items-center justify-center">
               <Settings className="w-5 h-5 text-muted-foreground" />
             </div>
-            <span className="text-lg font-medium text-foreground">Settings</span>
+            <span className="text-lg font-medium text-foreground">{t('sidebar.toolsSettings')}</span>
           </button>
         </div>
         
         {/* Desktop Settings */}
-        <Button
-          variant="ghost"
-          className="hidden md:flex w-full justify-start gap-2 p-2 h-auto font-normal text-muted-foreground hover:text-foreground hover:bg-accent transition-colors duration-200"
-          onClick={onShowSettings}
-        >
-          <Settings className="w-3 h-3" />
-          <span className="text-xs">Tools Settings</span>
-        </Button>
+        <div className="hidden md:flex items-center justify-between gap-2 p-1">
+          <Button
+            variant="ghost"
+            className="flex-1 justify-start gap-2 p-2 h-auto font-normal text-muted-foreground hover:text-foreground hover:bg-accent transition-colors duration-200"
+            onClick={onShowSettings}
+          >
+            <Settings className="w-3 h-3" />
+            <span className="text-xs">{t('sidebar.toolsSettings')}</span>
+          </Button>
+          <LanguageToggle />
+        </div>
       </div>
     </div>
   );

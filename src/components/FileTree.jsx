@@ -1,70 +1,28 @@
 import React, { useState, useEffect } from 'react';
 import { ScrollArea } from './ui/scroll-area';
 import { Button } from './ui/button';
-import { Folder, FolderOpen, File, FileText, FileCode, List, TableProperties, Eye } from 'lucide-react';
+import { Folder, FolderOpen, File, FileText, FileCode, List, TableProperties, Eye, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
 import { cn } from '../lib/utils';
 import CodeEditor from './CodeEditor';
 import ImageViewer from './ImageViewer';
 import { api } from '../utils/api';
+import { useLanguage } from '../contexts/LanguageContext';
 
 function FileTree({ selectedProject }) {
+  const { t, language } = useLanguage();
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState(Date.now());
   const [expandedDirs, setExpandedDirs] = useState(new Set());
   const [selectedFile, setSelectedFile] = useState(null);
   const [selectedImage, setSelectedImage] = useState(null);
   const [viewMode, setViewMode] = useState('detailed'); // 'simple', 'detailed', 'compact'
-  const [lastRefresh, setLastRefresh] = useState(Date.now());
 
   useEffect(() => {
     if (selectedProject) {
       fetchFiles();
     }
-  }, [selectedProject]);
-
-  // Auto-refresh when files are created/modified
-  useEffect(() => {
-    if (!selectedProject) return;
-
-    // Set up auto-refresh on file operations
-    const handleFileOperation = (event) => {
-      // Custom event triggered when files are created/modified
-      if (event.detail?.projectName === selectedProject.name) {
-        console.log('File operation detected, refreshing file tree...');
-        fetchFiles();
-      }
-    };
-
-    // Listen for file operation events
-    window.addEventListener('file-operation', handleFileOperation);
-    
-    // Also refresh when tab becomes visible
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible' && selectedProject) {
-        const timeSinceRefresh = Date.now() - lastRefresh;
-        // Only refresh if more than 2 seconds have passed
-        if (timeSinceRefresh > 2000) {
-          fetchFiles();
-        }
-      }
-    };
-    
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    // Set up periodic refresh (every 5 seconds if panel is active)
-    const intervalId = setInterval(() => {
-      const filesPanel = document.querySelector('[data-panel="files"]');
-      if (filesPanel && !filesPanel.classList.contains('hidden')) {
-        fetchFiles();
-      }
-    }, 5000);
-
-    return () => {
-      window.removeEventListener('file-operation', handleFileOperation);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      clearInterval(intervalId);
-    };
-  }, [selectedProject, lastRefresh]);
+  }, [selectedProject?.name]);
 
   // Load view mode preference from localStorage
   useEffect(() => {
@@ -142,10 +100,10 @@ function FileTree({ selectedProject }) {
     const past = new Date(date);
     const diffInSeconds = Math.floor((now - past) / 1000);
     
-    if (diffInSeconds < 60) return 'just now';
-    if (diffInSeconds < 3600) return `${Math.floor(diffInSeconds / 60)} min ago`;
-    if (diffInSeconds < 86400) return `${Math.floor(diffInSeconds / 3600)} hours ago`;
-    if (diffInSeconds < 2592000) return `${Math.floor(diffInSeconds / 86400)} days ago`;
+    if (diffInSeconds < 60) return language === 'zh' ? '刚刚' : 'just now';
+    if (diffInSeconds < 3600) return `${Math.floor(diffInSeconds / 60)} ${language === 'zh' ? '分钟前' : 'min ago'}`;
+    if (diffInSeconds < 86400) return `${Math.floor(diffInSeconds / 3600)} ${language === 'zh' ? '小时前' : 'hours ago'}`;
+    if (diffInSeconds < 2592000) return `${Math.floor(diffInSeconds / 86400)} ${language === 'zh' ? '天前' : 'days ago'}`;
     return past.toLocaleDateString();
   };
 
@@ -180,7 +138,18 @@ function FileTree({ selectedProject }) {
             }
           }}
         >
-          <div className="flex items-center gap-2 min-w-0 w-full">
+          <div className="flex items-center gap-1.5 min-w-0 w-full">
+            {item.type === 'directory' ? (
+              <span className="w-3.5 h-3.5 flex items-center justify-center flex-shrink-0 text-muted-foreground">
+                {expandedDirs.has(item.path) ? (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5" />
+                )}
+              </span>
+            ) : (
+              <span className="w-3.5 h-3.5 flex-shrink-0" />
+            )}
             {item.type === 'directory' ? (
               expandedDirs.has(item.path) ? (
                 <FolderOpen className="w-4 h-4 text-blue-500 flex-shrink-0" />
@@ -196,13 +165,19 @@ function FileTree({ selectedProject }) {
           </div>
         </Button>
         
-        {item.type === 'directory' && 
-         expandedDirs.has(item.path) && 
-         item.children && 
-         item.children.length > 0 && (
-          <div>
-            {renderFileTree(item.children, level + 1)}
-          </div>
+        {item.type === 'directory' && expandedDirs.has(item.path) && (
+          item.children && item.children.length > 0 ? (
+            <div>
+              {renderFileTree(item.children, level + 1)}
+            </div>
+          ) : (
+            <div
+              className="text-xs text-muted-foreground/60 italic py-1.5 flex items-center gap-1 select-none"
+              style={{ paddingLeft: `${level * 16 + 36}px` }}
+            >
+              <span>{language === 'zh' ? '(空文件夹)' : '(empty folder)'}</span>
+            </div>
+          )
         )}
       </div>
     ));
@@ -238,7 +213,7 @@ function FileTree({ selectedProject }) {
       <div key={item.path} className="select-none">
         <div
           className={cn(
-            "grid grid-cols-12 gap-2 p-2 hover:bg-accent cursor-pointer items-center",
+            "grid grid-cols-12 gap-2 p-2 hover:bg-accent cursor-pointer items-center transition-colors",
           )}
           style={{ paddingLeft: `${level * 16 + 12}px` }}
           onClick={() => {
@@ -261,7 +236,18 @@ function FileTree({ selectedProject }) {
             }
           }}
         >
-          <div className="col-span-5 flex items-center gap-2 min-w-0">
+          <div className="col-span-5 flex items-center gap-1.5 min-w-0">
+            {item.type === 'directory' ? (
+              <span className="w-3.5 h-3.5 flex items-center justify-center flex-shrink-0 text-muted-foreground">
+                {expandedDirs.has(item.path) ? (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5" />
+                )}
+              </span>
+            ) : (
+              <span className="w-3.5 h-3.5 flex-shrink-0" />
+            )}
             {item.type === 'directory' ? (
               expandedDirs.has(item.path) ? (
                 <FolderOpen className="w-4 h-4 text-blue-500 flex-shrink-0" />
@@ -271,12 +257,14 @@ function FileTree({ selectedProject }) {
             ) : (
               getFileIcon(item.name)
             )}
-            <span className="text-sm truncate text-foreground">
+            <span className="text-sm truncate text-foreground font-medium">
               {item.name}
             </span>
           </div>
           <div className="col-span-2 text-sm text-muted-foreground">
-            {item.type === 'file' ? formatFileSize(item.size) : '-'}
+            {item.type === 'file' 
+              ? formatFileSize(item.size) 
+              : (item.children ? `${item.children.length} ${language === 'zh' ? '项' : 'items'}` : '-')}
           </div>
           <div className="col-span-3 text-sm text-muted-foreground">
             {formatRelativeTime(item.modified)}
@@ -286,10 +274,18 @@ function FileTree({ selectedProject }) {
           </div>
         </div>
         
-        {item.type === 'directory' && 
-         expandedDirs.has(item.path) && 
-         item.children && 
-         renderDetailedView(item.children, level + 1)}
+        {item.type === 'directory' && expandedDirs.has(item.path) && (
+          item.children && item.children.length > 0 ? (
+            renderDetailedView(item.children, level + 1)
+          ) : (
+            <div
+              className="text-xs text-muted-foreground/60 italic py-1.5 flex items-center gap-1 select-none"
+              style={{ paddingLeft: `${level * 16 + 36}px` }}
+            >
+              <span>{language === 'zh' ? '(空文件夹)' : '(empty folder)'}</span>
+            </div>
+          )
+        )}
       </div>
     ));
   };
@@ -300,7 +296,7 @@ function FileTree({ selectedProject }) {
       <div key={item.path} className="select-none">
         <div
           className={cn(
-            "flex items-center justify-between p-2 hover:bg-accent cursor-pointer",
+            "flex items-center justify-between p-2 hover:bg-accent cursor-pointer transition-colors",
           )}
           style={{ paddingLeft: `${level * 16 + 12}px` }}
           onClick={() => {
@@ -323,7 +319,18 @@ function FileTree({ selectedProject }) {
             }
           }}
         >
-          <div className="flex items-center gap-2 min-w-0">
+          <div className="flex items-center gap-1.5 min-w-0">
+            {item.type === 'directory' ? (
+              <span className="w-3.5 h-3.5 flex items-center justify-center flex-shrink-0 text-muted-foreground">
+                {expandedDirs.has(item.path) ? (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5" />
+                )}
+              </span>
+            ) : (
+              <span className="w-3.5 h-3.5 flex-shrink-0" />
+            )}
             {item.type === 'directory' ? (
               expandedDirs.has(item.path) ? (
                 <FolderOpen className="w-4 h-4 text-blue-500 flex-shrink-0" />
@@ -333,24 +340,34 @@ function FileTree({ selectedProject }) {
             ) : (
               getFileIcon(item.name)
             )}
-            <span className="text-sm truncate text-foreground">
+            <span className="text-sm truncate text-foreground font-medium">
               {item.name}
             </span>
           </div>
           <div className="flex items-center gap-3 text-xs text-muted-foreground">
-            {item.type === 'file' && (
+            {item.type === 'file' ? (
               <>
                 <span>{formatFileSize(item.size)}</span>
                 <span className="font-mono">{item.permissionsRwx}</span>
               </>
+            ) : (
+              <span>{item.children ? `${item.children.length} ${language === 'zh' ? '项' : 'items'}` : '-'}</span>
             )}
           </div>
         </div>
         
-        {item.type === 'directory' && 
-         expandedDirs.has(item.path) && 
-         item.children && 
-         renderCompactView(item.children, level + 1)}
+        {item.type === 'directory' && expandedDirs.has(item.path) && (
+          item.children && item.children.length > 0 ? (
+            renderCompactView(item.children, level + 1)
+          ) : (
+            <div
+              className="text-xs text-muted-foreground/60 italic py-1.5 flex items-center gap-1 select-none"
+              style={{ paddingLeft: `${level * 16 + 36}px` }}
+            >
+              <span>{language === 'zh' ? '(空文件夹)' : '(empty folder)'}</span>
+            </div>
+          )
+        )}
       </div>
     ));
   };
@@ -367,16 +384,27 @@ function FileTree({ selectedProject }) {
 
   return (
     <div className="h-full flex flex-col bg-card">
-      {/* View Mode Toggle */}
+      {/* View Mode Toggle & Refresh Button */}
       <div className="p-4 border-b border-border flex items-center justify-between">
-        <h3 className="text-sm font-medium text-foreground">Files</h3>
-        <div className="flex gap-1">
+        <h3 className="text-sm font-medium text-foreground">{t('files.title')}</h3>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 w-8 p-0 hover:bg-muted text-muted-foreground hover:text-foreground mr-1"
+            onClick={fetchFiles}
+            disabled={loading}
+            title={language === 'zh' ? '刷新文件列表' : 'Refresh files'}
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin text-primary' : ''}`} />
+          </Button>
+          <div className="h-4 w-[1px] bg-border mx-1" />
           <Button
             variant={viewMode === 'simple' ? 'default' : 'ghost'}
             size="sm"
             className="h-8 w-8 p-0"
             onClick={() => changeViewMode('simple')}
-            title="Simple view"
+            title={language === 'zh' ? '列表视图' : 'Simple view'}
           >
             <List className="w-4 h-4" />
           </Button>
@@ -385,7 +413,7 @@ function FileTree({ selectedProject }) {
             size="sm"
             className="h-8 w-8 p-0"
             onClick={() => changeViewMode('compact')}
-            title="Compact view"
+            title={language === 'zh' ? '紧凑视图' : 'Compact view'}
           >
             <Eye className="w-4 h-4" />
           </Button>
@@ -394,7 +422,7 @@ function FileTree({ selectedProject }) {
             size="sm"
             className="h-8 w-8 p-0"
             onClick={() => changeViewMode('detailed')}
-            title="Detailed view"
+            title={language === 'zh' ? '详细视图' : 'Detailed view'}
           >
             <TableProperties className="w-4 h-4" />
           </Button>
@@ -405,10 +433,10 @@ function FileTree({ selectedProject }) {
       {viewMode === 'detailed' && files.length > 0 && (
         <div className="px-4 pt-2 pb-1 border-b border-border">
           <div className="grid grid-cols-12 gap-2 px-2 text-xs font-medium text-muted-foreground">
-            <div className="col-span-5">Name</div>
-            <div className="col-span-2">Size</div>
-            <div className="col-span-3">Modified</div>
-            <div className="col-span-2">Permissions</div>
+            <div className="col-span-5">{t('common.name')}</div>
+            <div className="col-span-2">{t('common.size')}</div>
+            <div className="col-span-3">{t('common.modified')}</div>
+            <div className="col-span-2">{t('common.permissions')}</div>
           </div>
         </div>
       )}
@@ -419,9 +447,9 @@ function FileTree({ selectedProject }) {
             <div className="w-12 h-12 bg-muted rounded-lg flex items-center justify-center mx-auto mb-3">
               <Folder className="w-6 h-6 text-muted-foreground" />
             </div>
-            <h4 className="font-medium text-foreground mb-1">No files found</h4>
+            <h4 className="font-medium text-foreground mb-1">{t('files.noFilesFound')}</h4>
             <p className="text-sm text-muted-foreground">
-              Check if the project path is accessible
+              {language === 'zh' ? '请检查项目目录是否可正常访问' : 'Check if the project path is accessible'}
             </p>
           </div>
         ) : (

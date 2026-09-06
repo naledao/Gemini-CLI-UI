@@ -46,6 +46,32 @@ async function validateGitRepository(projectPath) {
   }
 }
 
+// Helper function to safely get current branch, even on newly initialized repositories with no commits
+async function getCurrentBranch(projectPath) {
+  try {
+    const { stdout } = await execAsync('git branch --show-current', { cwd: projectPath });
+    if (stdout.trim()) {
+      return stdout.trim();
+    }
+  } catch {}
+
+  try {
+    const { stdout } = await execAsync('git symbolic-ref --short HEAD', { cwd: projectPath });
+    if (stdout.trim()) {
+      return stdout.trim();
+    }
+  } catch {}
+
+  try {
+    const { stdout } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: projectPath });
+    if (stdout.trim() && stdout.trim() !== 'HEAD') {
+      return stdout.trim();
+    }
+  } catch {}
+
+  return 'master';
+}
+
 // Get git status for a project
 router.get('/status', async (req, res) => {
   const { project } = req.query;
@@ -61,8 +87,8 @@ router.get('/status', async (req, res) => {
     // Validate git repository
     await validateGitRepository(projectPath);
 
-    // Get current branch
-    const { stdout: branch } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: projectPath });
+    // Get current branch safely
+    const branch = await getCurrentBranch(projectPath);
     
     // Get git status
     const { stdout: statusOutput } = await execAsync('git status --porcelain', { cwd: projectPath });
@@ -201,7 +227,7 @@ router.get('/branches', async (req, res) => {
     const { stdout } = await execAsync('git branch -a', { cwd: projectPath });
     
     // Parse branches
-    const branches = stdout
+    let branches = stdout
       .split('\n')
       .map(branch => branch.trim())
       .filter(branch => branch && !branch.includes('->')) // Remove empty lines and HEAD pointer
@@ -217,6 +243,11 @@ router.get('/branches', async (req, res) => {
         return branch;
       })
       .filter((branch, index, self) => self.indexOf(branch) === index); // Remove duplicates
+
+    if (branches.length === 0) {
+      const currentBranch = await getCurrentBranch(projectPath);
+      branches = [currentBranch];
+    }
     
     res.json({ branches });
   } catch (error) {
@@ -278,11 +309,20 @@ router.get('/commits', async (req, res) => {
   try {
     const projectPath = await getActualProjectPath(project);
     
-    // Get commit log with stats
-    const { stdout } = await execAsync(
-      `git log --pretty=format:'%H|%an|%ae|%ad|%s' --date=relative -n ${limit}`,
-      { cwd: projectPath }
-    );
+    let stdout = '';
+    try {
+      // Get commit log with stats
+      const result = await execAsync(
+        `git log --pretty=format:'%H|%an|%ae|%ad|%s' --date=relative -n ${limit}`,
+        { cwd: projectPath }
+      );
+      stdout = result.stdout;
+    } catch (error) {
+      if (error.message.includes('does not have any commits yet') || error.message.includes('fatal: bad default revision')) {
+        return res.json({ commits: [] });
+      }
+      throw error;
+    }
     
     const commits = stdout
       .split('\n')
@@ -432,9 +472,8 @@ router.get('/remote-status', async (req, res) => {
     const projectPath = await getActualProjectPath(project);
     await validateGitRepository(projectPath);
 
-    // Get current branch
-    const { stdout: currentBranch } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: projectPath });
-    const branch = currentBranch.trim();
+    // Get current branch safely
+    const branch = await getCurrentBranch(projectPath);
 
     // Check if there's a remote tracking branch (smart detection)
     let trackingBranch;
@@ -487,9 +526,8 @@ router.post('/fetch', async (req, res) => {
     const projectPath = await getActualProjectPath(project);
     await validateGitRepository(projectPath);
 
-    // Get current branch and its upstream remote
-    const { stdout: currentBranch } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: projectPath });
-    const branch = currentBranch.trim();
+    // Get current branch and its upstream remote safely
+    const branch = await getCurrentBranch(projectPath);
 
     let remoteName = 'origin'; // fallback
     try {
@@ -528,9 +566,8 @@ router.post('/pull', async (req, res) => {
     const projectPath = await getActualProjectPath(project);
     await validateGitRepository(projectPath);
 
-    // Get current branch and its upstream remote
-    const { stdout: currentBranch } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: projectPath });
-    const branch = currentBranch.trim();
+    // Get current branch and its upstream remote safely
+    const branch = await getCurrentBranch(projectPath);
 
     let remoteName = 'origin'; // fallback
     let remoteBranch = branch; // fallback
@@ -595,9 +632,8 @@ router.post('/push', async (req, res) => {
     const projectPath = await getActualProjectPath(project);
     await validateGitRepository(projectPath);
 
-    // Get current branch and its upstream remote
-    const { stdout: currentBranch } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: projectPath });
-    const branch = currentBranch.trim();
+    // Get current branch and its upstream remote safely
+    const branch = await getCurrentBranch(projectPath);
 
     let remoteName = 'origin'; // fallback
     let remoteBranch = branch; // fallback

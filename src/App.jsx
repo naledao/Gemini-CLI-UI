@@ -22,13 +22,13 @@ import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, useNavigate, useParams } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import MainContent from './components/MainContent';
-import MobileNav from './components/MobileNav';
 import ToolsSettings from './components/ToolsSettings';
 import QuickSettingsPanel from './components/QuickSettingsPanel';
 import ErrorBoundary from './components/ErrorBoundary';
 
 import { useWebSocket } from './utils/websocket';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { LanguageProvider } from './contexts/LanguageContext';
 import { AuthProvider } from './contexts/AuthContext';
 import ProtectedRoute from './components/ProtectedRoute';
 import { useVersionCheck } from './hooks/useVersionCheck';
@@ -49,6 +49,10 @@ function AppContent() {
   const [activeTab, setActiveTab] = useState('chat'); // 'chat' or 'files'
   const [isMobile, setIsMobile] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(() => {
+    const saved = localStorage.getItem('desktopSidebarOpen');
+    return saved !== null ? JSON.parse(saved) : true;
+  });
   const [isLoadingProjects, setIsLoadingProjects] = useState(true);
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [showToolsSettings, setShowToolsSettings] = useState(false);
@@ -315,6 +319,33 @@ function AppContent() {
 
 
 
+  const handleToggleSidebar = () => {
+    if (isMobile) {
+      setSidebarOpen(prev => !prev);
+    } else {
+      setDesktopSidebarOpen(prev => {
+        const next = !prev;
+        localStorage.setItem('desktopSidebarOpen', JSON.stringify(next));
+        return next;
+      });
+    }
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'b' || e.key === 'B')) {
+        const tag = e.target?.tagName?.toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) {
+          return;
+        }
+        e.preventDefault();
+        handleToggleSidebar();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isMobile]);
+
   const handleSidebarRefresh = async () => {
     // Refresh only the sessions for all projects, don't change selected state
     try {
@@ -508,10 +539,14 @@ function AppContent() {
 
   return (
     <div className="fixed inset-0 flex bg-background">
-      {/* Fixed Desktop Sidebar */}
+      {/* Desktop Sidebar */}
       {!isMobile && (
-        <div className="w-80 flex-shrink-0 border-r border-border bg-card">
-          <div className="h-full overflow-hidden">
+        <div
+          className={`transition-[width] duration-300 ease-in-out h-full flex-shrink-0 bg-card overflow-hidden ${
+            desktopSidebarOpen ? 'w-80 border-r border-border' : 'w-0 border-r-0'
+          }`}
+        >
+          <div className="w-80 h-full overflow-hidden">
             <Sidebar
               projects={projects}
               selectedProject={selectedProject}
@@ -528,6 +563,8 @@ function AppContent() {
               latestVersion={latestVersion}
               currentVersion={currentVersion}
               onShowVersionModal={() => setShowVersionModal(true)}
+              onToggleCollapse={handleToggleSidebar}
+              isCollapsed={!desktopSidebarOpen}
             />
           </div>
         </div>
@@ -573,6 +610,7 @@ function AppContent() {
               latestVersion={latestVersion}
               currentVersion={currentVersion}
               onShowVersionModal={() => setShowVersionModal(true)}
+              onCloseMobile={() => setSidebarOpen(false)}
             />
           </div>
         </div>
@@ -583,13 +621,13 @@ function AppContent() {
         <MainContent
           selectedProject={selectedProject}
           selectedSession={selectedSession}
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
           ws={ws}
           sendMessage={sendMessage}
           messages={messages}
           isMobile={isMobile}
-          onMenuClick={() => setSidebarOpen(true)}
+          sidebarOpen={isMobile ? sidebarOpen : desktopSidebarOpen}
+          onToggleSidebar={handleToggleSidebar}
+          onMenuClick={handleToggleSidebar}
           isLoading={isLoadingProjects}
           onInputFocusChange={setIsInputFocused}
           onSessionActive={markSessionAsActive}
@@ -603,37 +641,27 @@ function AppContent() {
         />
       </div>
 
-      {/* Mobile Bottom Navigation */}
-      {isMobile && (
-        <MobileNav
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
-          isInputFocused={isInputFocused}
-        />
-      )}
-      {/* Quick Settings Panel - Only show on chat tab */}
-      {activeTab === 'chat' && (
-        <QuickSettingsPanel
-          isOpen={showQuickSettings}
-          onToggle={setShowQuickSettings}
-          autoExpandTools={autoExpandTools}
-          onAutoExpandChange={(value) => {
-            setAutoExpandTools(value);
-            localStorage.setItem('autoExpandTools', JSON.stringify(value));
-          }}
-          showRawParameters={showRawParameters}
-          onShowRawParametersChange={(value) => {
-            setShowRawParameters(value);
-            localStorage.setItem('showRawParameters', JSON.stringify(value));
-          }}
-          autoScrollToBottom={autoScrollToBottom}
-          onAutoScrollChange={(value) => {
-            setAutoScrollToBottom(value);
-            localStorage.setItem('autoScrollToBottom', JSON.stringify(value));
-          }}
-          isMobile={isMobile}
-        />
-      )}
+      {/* Quick Settings Panel */}
+      <QuickSettingsPanel
+        isOpen={showQuickSettings}
+        onToggle={setShowQuickSettings}
+        autoExpandTools={autoExpandTools}
+        onAutoExpandChange={(value) => {
+          setAutoExpandTools(value);
+          localStorage.setItem('autoExpandTools', JSON.stringify(value));
+        }}
+        showRawParameters={showRawParameters}
+        onShowRawParametersChange={(value) => {
+          setShowRawParameters(value);
+          localStorage.setItem('showRawParameters', JSON.stringify(value));
+        }}
+        autoScrollToBottom={autoScrollToBottom}
+        onAutoScrollChange={(value) => {
+          setAutoScrollToBottom(value);
+          localStorage.setItem('autoScrollToBottom', JSON.stringify(value));
+        }}
+        isMobile={isMobile}
+      />
 
       {/* Tools Settings Modal */}
       <ToolsSettings
@@ -652,16 +680,18 @@ function App() {
   return (
     <ErrorBoundary>
       <ThemeProvider>
-        <AuthProvider>
-          <ProtectedRoute>
-            <Router>
-              <Routes>
-                <Route path="/" element={<AppContent />} />
-                <Route path="/session/:sessionId" element={<AppContent />} />
-              </Routes>
-            </Router>
-          </ProtectedRoute>
-        </AuthProvider>
+        <LanguageProvider>
+          <AuthProvider>
+            <ProtectedRoute>
+              <Router>
+                <Routes>
+                  <Route path="/" element={<AppContent />} />
+                  <Route path="/session/:sessionId" element={<AppContent />} />
+                </Routes>
+              </Router>
+            </ProtectedRoute>
+          </AuthProvider>
+        </LanguageProvider>
       </ThemeProvider>
     </ErrorBoundary>
   );

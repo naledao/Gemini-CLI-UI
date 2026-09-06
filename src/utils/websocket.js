@@ -1,104 +1,126 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 
 export function useWebSocket() {
   const [ws, setWs] = useState(null);
   const [messages, setMessages] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
+  const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
+  const pingIntervalRef = useRef(null);
+  const pendingMessagesRef = useRef([]);
 
-  useEffect(() => {
-    connect();
-    
-    return () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      if (ws) {
-        ws.close();
-      }
-    };
+  const cleanup = useCallback(() => {
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+      pingIntervalRef.current = null;
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
   }, []);
 
-  const connect = async () => {
+  const connect = useCallback(async () => {
     try {
-      // Get authentication token
       const token = localStorage.getItem('auth-token');
       if (!token) {
-        // console.warn('No authentication token found for WebSocket connection');
         return;
       }
-      
-      // Fetch server configuration to get the correct WebSocket URL
-      let wsBaseUrl;
-      try {
-        const configResponse = await fetch('/api/config', {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        });
-        const config = await configResponse.json();
-        wsBaseUrl = config.wsUrl;
-        
-        // If the config returns localhost but we're not on localhost, use current host but with API server port
-        if (wsBaseUrl.includes('localhost') && !window.location.hostname.includes('localhost')) {
-          // console.warn('Config returned localhost, using current host with API server port instead');
-          const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-          // For development, API server is typically on port 4008 when Vite is on 4009
-          const apiPort = window.location.port === '4009' ? '4008' : window.location.port;
-          wsBaseUrl = `${protocol}//${window.location.hostname}:${apiPort}`;
-        }
-      } catch (error) {
-        // console.warn('Could not fetch server config, falling back to current host with API server port');
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        // For development, API server is typically on port 4008 when Vite is on 4009
-        const apiPort = window.location.port === '4009' ? '4008' : window.location.port;
-        wsBaseUrl = `${protocol}//${window.location.hostname}:${apiPort}`;
+
+      // Cleanup existing connection if any
+      if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+        return;
       }
+
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`;
       
-      // Include token in WebSocket URL as query parameter
-      const wsUrl = `${wsBaseUrl}/ws?token=${encodeURIComponent(token)}`;
+      console.log('🔗 Connecting to WebSocket:', wsUrl);
       const websocket = new WebSocket(wsUrl);
+      wsRef.current = websocket;
 
       websocket.onopen = () => {
+        console.log('✅ WebSocket connected successfully');
         setIsConnected(true);
         setWs(websocket);
+
+        // Setup heartbeat ping every 25 seconds to keep FRP proxy alive
+        if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = setInterval(() => {
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 25000);
+
+        // Flush any queued messages
+        while (pendingMessagesRef.current.length > 0) {
+          const msg = pendingMessagesRef.current.shift();
+          console.log('🚀 Sending queued message:', msg);
+          websocket.send(JSON.stringify(msg));
+        }
       };
 
       websocket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          // Ignore heartbeat pong messages
+          if (data.type === 'pong') return;
           setMessages(prev => [...prev, data]);
         } catch (error) {
-          // console.error('Error parsing WebSocket message:', error);
+          console.error('Error parsing WebSocket message:', error);
         }
       };
 
-      websocket.onclose = () => {
+      websocket.onclose = (event) => {
+        console.warn('🔌 WebSocket disconnected (code:', event.code, ') - reconnecting in 2s');
         setIsConnected(false);
         setWs(null);
-        
-        // Attempt to reconnect after 3 seconds
+        wsRef.current = null;
+        if (pingIntervalRef.current) {
+          clearInterval(pingIntervalRef.current);
+          pingIntervalRef.current = null;
+        }
+
+        // Reconnect after 2 seconds
         reconnectTimeoutRef.current = setTimeout(() => {
           connect();
-        }, 3000);
+        }, 2000);
       };
 
       websocket.onerror = (error) => {
-        // console.error('WebSocket error:', error);
+        console.error('❌ WebSocket error:', error);
       };
 
     } catch (error) {
-      // console.error('Error creating WebSocket connection:', error);
+      console.error('Error creating WebSocket connection:', error);
     }
-  };
+  }, []);
 
-  const sendMessage = (message) => {
-    if (ws && isConnected) {
-      ws.send(JSON.stringify(message));
+  useEffect(() => {
+    connect();
+    return () => cleanup();
+  }, [connect, cleanup]);
+
+  const sendMessage = useCallback((message) => {
+    const socket = wsRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(message));
+      return true;
+    } else if (socket && socket.readyState === WebSocket.CONNECTING) {
+      console.log('⏳ WebSocket connecting, queuing message to send on connect...');
+      pendingMessagesRef.current.push(message);
+      return true;
     } else {
-      // console.warn('WebSocket not connected');
+      console.warn('⚠️ WebSocket not ready. Triggering reconnect and queuing message...');
+      pendingMessagesRef.current.push(message);
+      connect();
+      return true;
     }
-  };
+  }, [connect]);
 
   return {
     ws,

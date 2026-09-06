@@ -7,7 +7,31 @@ import { dirname } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const DB_PATH = path.join(__dirname, 'geminicliui_auth.db');
+// Determine database path with persistence in mind (especially for packaged binary)
+const getDatabasePath = () => {
+  if (process.env.DATABASE_PATH) {
+    return path.resolve(process.env.DATABASE_PATH);
+  }
+  
+  const homeGeminiDb = path.join(process.env.HOME || '/root', '.gemini', 'geminicliui_auth.db');
+  const localDb = path.join(__dirname, 'geminicliui_auth.db');
+  
+  if (fs.existsSync(homeGeminiDb)) {
+    return homeGeminiDb;
+  }
+  if (fs.existsSync(localDb)) {
+    return localDb;
+  }
+  // Default to user home .gemini directory for persistent storage across binary updates
+  try {
+    fs.mkdirSync(path.dirname(homeGeminiDb), { recursive: true });
+    return homeGeminiDb;
+  } catch (e) {
+    return localDb;
+  }
+};
+
+const DB_PATH = getDatabasePath();
 const INIT_SQL_PATH = path.join(__dirname, 'init.sql');
 
 // Create database connection

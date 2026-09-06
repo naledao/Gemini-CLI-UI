@@ -11,8 +11,10 @@ import { EditorView, Decoration } from '@codemirror/view';
 import { StateField, StateEffect, RangeSetBuilder } from '@codemirror/state';
 import { X, Save, Download, Maximize2, Minimize2, Eye, EyeOff } from 'lucide-react';
 import { api } from '../utils/api';
+import { useLanguage } from '../contexts/LanguageContext';
 
 function CodeEditor({ file, onClose, projectPath }) {
+  const { t, language } = useLanguage();
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -341,12 +343,12 @@ function CodeEditor({ file, onClose, projectPath }) {
                   <svg className="w-5 h-5 md:w-4 md:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                   </svg>
-                  <span className="hidden sm:inline">Saved!</span>
+                  <span className="hidden sm:inline">{t('common.saved')}</span>
                 </>
               ) : (
                 <>
                   <Save className="w-5 h-5 md:w-4 md:h-4" />
-                  <span className="hidden sm:inline">{saving ? 'Saving...' : 'Save'}</span>
+                  <span className="hidden sm:inline">{saving ? t('common.saving') : t('common.save')}</span>
                 </>
               )}
             </button>
@@ -354,7 +356,7 @@ function CodeEditor({ file, onClose, projectPath }) {
             <button
               onClick={toggleFullscreen}
               className="hidden md:flex p-2 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 items-center justify-center"
-              title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+              title={isFullscreen ? (language === 'zh' ? '退出全屏' : 'Exit fullscreen') : (language === 'zh' ? '全屏显示' : 'Fullscreen')}
             >
               {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
             </button>
@@ -362,7 +364,7 @@ function CodeEditor({ file, onClose, projectPath }) {
             <button
               onClick={onClose}
               className="p-2 md:p-2 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 min-w-[44px] min-h-[44px] md:min-w-0 md:min-h-0 flex items-center justify-center"
-              title="Close"
+              title={t('common.close')}
             >
               <X className="w-6 h-6 md:w-4 md:h-4" />
             </button>
@@ -405,13 +407,13 @@ function CodeEditor({ file, onClose, projectPath }) {
         {/* Footer */}
         <div className="flex items-center justify-between p-3 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 flex-shrink-0">
           <div className="flex items-center gap-4 text-sm text-gray-600 dark:text-gray-400">
-            <span>Lines: {content.split('\n').length}</span>
-            <span>Characters: {content.length}</span>
-            <span>Language: {file.name.split('.').pop()?.toUpperCase() || 'Text'}</span>
+            <span>{t('editor.lines', { count: content.split('\n').length })}</span>
+            <span>{t('editor.characters', { count: content.length })}</span>
+            <span>{t('editor.language', { lang: file.name.split('.').pop()?.toUpperCase() || 'Text' })}</span>
           </div>
           
           <div className="text-sm text-gray-500 dark:text-gray-400">
-            Press Ctrl+S to save • Esc to close
+            {t('editor.saveShortcutHint')}
           </div>
         </div>
       </div>

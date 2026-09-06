@@ -1,8 +1,11 @@
 import React from 'react';
 import { Badge } from './ui/badge';
 import { CheckCircle2, Clock, Circle } from 'lucide-react';
+import { useLanguage } from '../contexts/LanguageContext';
 
 const TodoList = ({ todos, isResult = false }) => {
+  const { t, language } = useLanguage();
+
   if (!todos || !Array.isArray(todos)) {
     return null;
   }
@@ -43,11 +46,37 @@ const TodoList = ({ todos, isResult = false }) => {
     }
   };
 
+  const getStatusLabel = (status) => {
+    if (language === 'zh') {
+      switch (status) {
+        case 'completed': return '已完成';
+        case 'in_progress': return '进行中';
+        case 'pending': return '待处理';
+        default: return status;
+      }
+    }
+    return status.replace('_', ' ');
+  };
+
+  const getPriorityLabel = (priority) => {
+    if (language === 'zh') {
+      switch (priority) {
+        case 'high': return '高优先级';
+        case 'medium': return '中优先级';
+        case 'low': return '低优先级';
+        default: return priority;
+      }
+    }
+    return priority;
+  };
+
   return (
     <div className="space-y-3">
       {isResult && (
         <div className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
-          Todo List ({todos.length} {todos.length === 1 ? 'item' : 'items'})
+          {language === 'zh'
+            ? `待办事项 (${todos.length} 项)`
+            : `Todo List (${todos.length} ${todos.length === 1 ? 'item' : 'items'})`}
         </div>
       )}
       
@@ -71,13 +100,13 @@ const TodoList = ({ todos, isResult = false }) => {
                   variant="outline"
                   className={`text-xs px-2 py-0.5 ${getPriorityColor(todo.priority)}`}
                 >
-                  {todo.priority}
+                  {getPriorityLabel(todo.priority)}
                 </Badge>
                 <Badge
                   variant="outline"
                   className={`text-xs px-2 py-0.5 ${getStatusColor(todo.status)}`}
                 >
-                  {todo.status.replace('_', ' ')}
+                  {getStatusLabel(todo.status)}
                 </Badge>
               </div>
             </div>

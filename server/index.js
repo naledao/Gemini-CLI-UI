@@ -39,9 +39,9 @@ import mime from 'mime-types';
 import { getProjects, getSessions, getSessionMessages, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache } from './projects.js';
 import { spawnGemini, abortGeminiSession } from './gemini-cli.js';
 import sessionManager from './sessionManager.js';
-import gitRoutes from './routes/git.js';
 import authRoutes from './routes/auth.js';
 import mcpRoutes from './routes/mcp.js';
+import gitRoutes from './routes/git.js';
 import { initializeDatabase } from './database/db.js';
 import { validateApiKey, authenticateToken, authenticateWebSocket } from './middleware/auth.js';
 
@@ -140,7 +140,7 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ 
   server,
   verifyClient: (info) => {
-    // console.log('WebSocket connection attempt to:', info.req.url);
+    console.log('🔗 WebSocket connection attempt from:', info.req.headers.host, 'url:', info.req.url);
     
     // Extract token from query parameters or headers
     const url = new URL(info.req.url, 'http://localhost');
@@ -150,13 +150,13 @@ const wss = new WebSocketServer({
     // Verify token
     const user = authenticateWebSocket(token);
     if (!user) {
-      // console.log('❌ WebSocket authentication failed');
+      console.log('❌ WebSocket authentication failed');
       return false;
     }
     
     // Store user info in the request for later use
     info.req.user = user;
-    // console.log('✅ WebSocket authenticated for user:', user.username);
+    console.log('✅ WebSocket authenticated for user:', user.username);
     return true;
   }
 });
@@ -170,25 +170,58 @@ app.use('/api', validateApiKey);
 // Authentication routes (public)
 app.use('/api/auth', authRoutes);
 
-// Git API Routes (protected)
-app.use('/api/git', authenticateToken, gitRoutes);
-
 // MCP API Routes (protected)
 app.use('/api/mcp', authenticateToken, mcpRoutes);
 
+// Git API Routes (protected)
+app.use('/api/git', authenticateToken, gitRoutes);
+
 // Static files served after API routes
 app.use(express.static(path.join(__dirname, '../dist')));
+
+// Helper to read local Gemini CLI configuration (model and thinking settings)
+function getLocalGeminiConfig() {
+  const settingsPath = path.join(process.env.HOME || '/root', '.gemini', 'settings.json');
+  let config = {
+    model: 'gemini-3.8-flash',
+    thinkingLevel: 'HIGH',
+    includeThoughts: true
+  };
+
+  try {
+    if (fs.existsSync(settingsPath)) {
+      const raw = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      const overrides = raw?.modelConfigs?.customOverrides || [];
+      if (overrides.length > 0) {
+        const first = overrides[0];
+        if (first?.modelConfig?.model) {
+          config.model = first.modelConfig.model;
+        }
+        const thinking = first?.modelConfig?.generateContentConfig?.thinkingConfig;
+        if (thinking?.thinkingLevel) {
+          config.thinkingLevel = thinking.thinkingLevel;
+        }
+        if (typeof thinking?.includeThoughts === 'boolean') {
+          config.includeThoughts = thinking.includeThoughts;
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Error reading local Gemini CLI settings:', e);
+  }
+  return config;
+}
 
 // API Routes (protected)
 app.get('/api/config', authenticateToken, (req, res) => {
   const host = req.headers.host || `${req.hostname}:${PORT}`;
   const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'wss' : 'ws';
-  
-  // console.log('Config API called - Returning host:', host, 'Protocol:', protocol);
+  const geminiConfig = getLocalGeminiConfig();
   
   res.json({
     serverPort: PORT,
-    wsUrl: `${protocol}://${host}`
+    wsUrl: `${protocol}://${host}`,
+    geminiConfig
   });
 });
 
@@ -266,6 +299,92 @@ app.delete('/api/projects/:projectName', authenticateToken, async (req, res) => 
   }
 });
 
+// Filesystem directory autocomplete & navigation endpoint
+app.get('/api/filesystem/directories', authenticateToken, async (req, res) => {
+  console.log('📂 [API] /api/filesystem/directories query:', req.query.path, 'user:', req.user?.username);
+  try {
+    let inputPath = req.query.path ? req.query.path.trim() : '';
+    if (!inputPath) {
+      inputPath = process.env.HOME || '/root';
+    } else if (inputPath === '~' || inputPath.startsWith('~/')) {
+      inputPath = inputPath.replace(/^~/, process.env.HOME || '/root');
+    }
+
+    // Resolve path
+    let targetDir = path.resolve(inputPath);
+    let filterPrefix = '';
+
+    // Check if targetDir exists and is directory
+    let isDir = false;
+    try {
+      const stat = await fsPromises.stat(targetDir);
+      isDir = stat.isDirectory();
+    } catch (e) {
+      isDir = false;
+    }
+
+    // If not a directory or path does not end with separator and does not exist,
+    // look inside the parent directory with prefix filtering
+    if (!isDir) {
+      filterPrefix = path.basename(targetDir).toLowerCase();
+      targetDir = path.dirname(targetDir);
+      try {
+        const stat = await fsPromises.stat(targetDir);
+        if (!stat.isDirectory()) {
+          return res.json({ currentPath: targetDir, parentPath: null, directories: [] });
+        }
+      } catch (e) {
+        return res.json({ currentPath: targetDir, parentPath: null, directories: [] });
+      }
+    }
+
+    const entries = await fsPromises.readdir(targetDir, { withFileTypes: true });
+    const directories = [];
+
+    for (const entry of entries) {
+      // Only directories or symlinks pointing to directories
+      if (entry.isDirectory() || entry.isSymbolicLink()) {
+        const name = entry.name;
+        // Skip hidden files unless prefix starts with dot
+        if (name.startsWith('.') && !filterPrefix.startsWith('.')) {
+          continue;
+        }
+        // Skip heavy / noisy directories
+        if (name === 'node_modules' || name === '.git' || name === 'proc' || name === 'sys') {
+          continue;
+        }
+
+        if (!filterPrefix || name.toLowerCase().startsWith(filterPrefix)) {
+          directories.push({
+            name,
+            path: path.join(targetDir, name)
+          });
+        }
+      }
+    }
+
+    // Sort alphabetically, limit to 60 items
+    directories.sort((a, b) => a.name.localeCompare(b.name));
+    if (directories.length > 60) {
+      directories.length = 60;
+    }
+
+    const parentPath = targetDir === '/' ? null : path.dirname(targetDir);
+
+    console.log('📂 [API] returning directories count:', directories.length, 'for targetDir:', targetDir);
+
+    res.json({
+      currentPath: targetDir,
+      parentPath,
+      filterPrefix,
+      directories
+    });
+  } catch (error) {
+    console.error('📂 [API] Error in /api/filesystem/directories:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Create project endpoint
 app.post('/api/projects/create', authenticateToken, async (req, res) => {
   try {
@@ -279,6 +398,81 @@ app.post('/api/projects/create', authenticateToken, async (req, res) => {
     res.json({ success: true, project });
   } catch (error) {
     // console.error('Error creating project:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Helper to recursively build file tree for FileTree component
+async function buildFileTree(dirPath, maxDepth = 4, depth = 0) {
+  if (depth > maxDepth) return [];
+  try {
+    const entries = await fsPromises.readdir(dirPath, { withFileTypes: true });
+    const items = [];
+
+    for (const entry of entries) {
+      const name = entry.name;
+      // Skip hidden files/dirs and noisy build/dependency folders
+      if (name.startsWith('.') || name === 'node_modules' || name === 'dist' || name === 'build' || name === 'target' || name === '__pycache__') {
+        continue;
+      }
+
+      const fullPath = path.join(dirPath, name);
+      try {
+        const stat = await fsPromises.stat(fullPath);
+        const isDirectory = stat.isDirectory();
+        
+        const mode = stat.mode;
+        const permissionsRwx = [
+          (mode & 0o400 ? 'r' : '-'),
+          (mode & 0o200 ? 'w' : '-'),
+          (mode & 0o100 ? 'x' : '-'),
+          (mode & 0o040 ? 'r' : '-'),
+          (mode & 0o020 ? 'w' : '-'),
+          (mode & 0o010 ? 'x' : '-'),
+          (mode & 0o004 ? 'r' : '-'),
+          (mode & 0o002 ? 'w' : '-'),
+          (mode & 0o001 ? 'x' : '-')
+        ].join('');
+
+        const item = {
+          name,
+          path: fullPath,
+          type: isDirectory ? 'directory' : 'file',
+          size: stat.size,
+          modified: stat.mtime.toISOString(),
+          permissionsRwx
+        };
+
+        if (isDirectory) {
+          item.children = await buildFileTree(fullPath, maxDepth, depth + 1);
+        }
+
+        items.push(item);
+      } catch (err) {
+        // Skip inaccessible entries
+      }
+    }
+
+    return items.sort((a, b) => {
+      if (a.type === b.type) return a.name.localeCompare(b.name);
+      return a.type === 'directory' ? -1 : 1;
+    });
+  } catch (error) {
+    return [];
+  }
+}
+
+// Get project files tree endpoint
+app.get('/api/projects/:projectName/files', authenticateToken, async (req, res) => {
+  try {
+    const projectPath = await extractProjectDirectory(req.params.projectName);
+    if (!projectPath) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+    const files = await buildFileTree(projectPath);
+    res.json(files);
+  } catch (error) {
+    console.error('Error fetching project files:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -406,55 +600,124 @@ app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) =
   }
 });
 
-app.get('/api/projects/:projectName/files', authenticateToken, async (req, res) => {
-  try {
-    
-    // Using fsPromises from import
-    
-    // Use extractProjectDirectory to get the actual project path
-    let actualPath;
-    try {
-      actualPath = await extractProjectDirectory(req.params.projectName);
-    } catch (error) {
-      // console.error('Error extracting project directory:', error);
-      // Fallback to simple dash replacement
-      actualPath = req.params.projectName.replace(/-/g, '/');
-    }
-    
-    // Check if path exists
-    try {
-      await fsPromises.access(actualPath);
-    } catch (e) {
-      return res.status(404).json({ error: `Project path not found: ${actualPath}` });
-    }
-    
-    const files = await getFileTree(actualPath, 3, 0, true);
-    const hiddenFiles = files.filter(f => f.name.startsWith('.'));
-    res.json(files);
-  } catch (error) {
-    // console.error('❌ File tree error:', error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // WebSocket connection handler that routes based on URL path
 wss.on('connection', (ws, request) => {
   const url = request.url;
-  // console.log('🔗 Client connected to:', url);
   
   // Parse URL to get pathname without query parameters
   const urlObj = new URL(url, 'http://localhost');
   const pathname = urlObj.pathname;
   
-  if (pathname === '/shell') {
-    handleShellConnection(ws);
-  } else if (pathname === '/ws') {
+  if (pathname === '/ws') {
     handleChatConnection(ws);
+  } else if (pathname === '/shell') {
+    handleShellConnection(ws);
   } else {
-    // console.log('❌ Unknown WebSocket path:', pathname);
     ws.close();
   }
 });
+
+// Handle shell WebSocket connections for interactive terminal emulation
+function handleShellConnection(ws) {
+  console.log('🐚 Shell client connected');
+  let shellProcess = null;
+
+  ws.on('message', async (message) => {
+    try {
+      const data = JSON.parse(message);
+
+      if (data.type === 'init') {
+        const projectPath = data.projectPath || process.env.HOME || '/root';
+        const cols = data.cols || 80;
+        const rows = data.rows || 24;
+
+        // Ensure target directory exists and is a directory
+        let cwd = projectPath;
+        try {
+          const stat = await fsPromises.stat(cwd);
+          if (!stat.isDirectory()) {
+            cwd = path.dirname(cwd);
+          }
+        } catch (e) {
+          cwd = process.env.HOME || '/root';
+        }
+
+        console.log(`🐚 Starting interactive shell in: ${cwd} (${cols}x${rows})`);
+
+        try {
+          shellProcess = pty.spawn('bash', ['--login'], {
+            name: 'xterm-256color',
+            cols: cols,
+            rows: rows,
+            cwd: cwd,
+            env: {
+              ...process.env,
+              TERM: 'xterm-256color',
+              COLORTERM: 'truecolor',
+              FORCE_COLOR: '3'
+            }
+          });
+
+          console.log('🟢 Shell process started with PTY, PID:', shellProcess.pid);
+
+          shellProcess.onData((outputData) => {
+            if (ws.readyState === ws.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'output',
+                data: outputData
+              }));
+            }
+          });
+
+          shellProcess.onExit((exitCode) => {
+            console.log('🔚 Shell process exited with code:', exitCode.exitCode);
+            if (ws.readyState === ws.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'output',
+                data: `\r\n\x1b[33m[Process exited with code ${exitCode.exitCode}]\x1b[0m\r\n`
+              }));
+            }
+            shellProcess = null;
+          });
+        } catch (spawnError) {
+          console.error('❌ Failed to spawn shell process:', spawnError);
+          if (ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'output',
+              data: `\r\n\x1b[31mError starting shell: ${spawnError.message}\x1b[0m\r\n`
+            }));
+          }
+        }
+      } else if (data.type === 'input') {
+        if (shellProcess && shellProcess.write) {
+          shellProcess.write(data.data);
+        }
+      } else if (data.type === 'resize') {
+        if (shellProcess && shellProcess.resize) {
+          try {
+            shellProcess.resize(data.cols, data.rows);
+          } catch (err) {}
+        }
+      }
+    } catch (error) {
+      console.error('❌ Shell message parsing error:', error);
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('🔌 Shell client disconnected');
+    if (shellProcess) {
+      try {
+        shellProcess.kill();
+      } catch (err) {}
+      shellProcess = null;
+    }
+  });
+
+  ws.on('error', (error) => {
+    console.error('❌ Shell WebSocket error:', error);
+  });
+}
 
 // Handle chat WebSocket connections
 function handleChatConnection(ws) {
@@ -467,13 +730,19 @@ function handleChatConnection(ws) {
     try {
       const data = JSON.parse(message);
       
+      if (data.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong' }));
+        return;
+      }
+
       if (data.type === 'gemini-command') {
-        // console.log('💬 User message:', data.command || '[Continue/Resume]');
-        // console.log('📁 Project:', data.options?.projectPath || 'Unknown');
-        // console.log('🔄 Session:', data.options?.sessionId ? 'Resume' : 'New');
+        console.log('💬 User message:', data.command || '[Continue/Resume]');
+        console.log('📁 Project:', data.options?.projectPath || 'Unknown');
+        console.log('📂 cwd:', data.options?.cwd || 'Unknown');
+        console.log('🔄 Session:', data.options?.sessionId ? 'Resume' : 'New');
         await spawnGemini(data.command, data.options, ws);
       } else if (data.type === 'abort-session') {
-        // console.log('🛑 Abort session request:', data.sessionId);
+        console.log('🛑 Abort session request:', data.sessionId);
         const success = abortGeminiSession(data.sessionId);
         ws.send(JSON.stringify({
           type: 'session-aborted',
@@ -482,201 +751,20 @@ function handleChatConnection(ws) {
         }));
       }
     } catch (error) {
-      // console.error('❌ Chat WebSocket error:', error.message);
+      console.error('❌ Chat WebSocket error:', error.message);
       ws.send(JSON.stringify({
-        type: 'error',
+        type: 'gemini-error',
         error: error.message
       }));
     }
   });
   
   ws.on('close', () => {
-    // console.log('🔌 Chat client disconnected');
     // Remove from connected clients
     connectedClients.delete(ws);
   });
 }
 
-// Handle shell WebSocket connections
-function handleShellConnection(ws) {
-  // console.log('🐚 Shell client connected');
-  let shellProcess = null;
-  
-  ws.on('message', async (message) => {
-    try {
-      const data = JSON.parse(message);
-      // console.log('📨 Shell message received:', data.type);
-      
-      if (data.type === 'init') {
-        // Initialize shell with project path and session info
-        const projectPath = data.projectPath || process.cwd();
-        const sessionId = data.sessionId;
-        const hasSession = data.hasSession;
-        
-        
-        // First send a welcome message
-        const welcomeMsg = hasSession ? 
-          `\x1b[36mResuming Gemini session ${sessionId} in: ${projectPath}\x1b[0m\r\n` :
-          `\x1b[36mStarting new Gemini session in: ${projectPath}\x1b[0m\r\n`;
-        
-        ws.send(JSON.stringify({
-          type: 'output',
-          data: welcomeMsg
-        }));
-        
-        try {
-          // Get gemini command from environment or use default
-          const geminiPath = process.env.GEMINI_PATH || 'gemini';
-          
-          // First check if gemini CLI is available
-          try {
-            execSync(`which ${geminiPath}`, { stdio: 'ignore' });
-          } catch (error) {
-            // console.error('❌ Gemini CLI not found in PATH or GEMINI_PATH');
-            ws.send(JSON.stringify({
-              type: 'output',
-              data: `\r\n\x1b[31mError: Gemini CLI not found. Please check:\x1b[0m\r\n\x1b[33m1. Install gemini globally: npm install -g @google/generative-ai-cli\x1b[0m\r\n\x1b[33m2. Or set GEMINI_PATH in .env file\x1b[0m\r\n`
-            }));
-            return;
-          }
-          
-          // Build shell command that changes to project directory first, then runs gemini
-          let geminiCommand = geminiPath;
-          
-          if (hasSession && sessionId) {
-            // Try to resume session, but with fallback to new session if it fails
-            geminiCommand = `${geminiPath} --resume ${sessionId} || ${geminiPath}`;
-          }
-          
-          // Create shell command that cds to the project directory first
-          const shellCommand = `cd "${projectPath}" && ${geminiCommand}`;
-          
-          
-          // Start shell using PTY for proper terminal emulation
-          shellProcess = pty.spawn('bash', ['-c', shellCommand], {
-            name: 'xterm-256color',
-            cols: 80,
-            rows: 24,
-            cwd: process.env.HOME || '/', // Start from home directory
-            env: { 
-              ...process.env,
-              TERM: 'xterm-256color',
-              COLORTERM: 'truecolor',
-              FORCE_COLOR: '3',
-              // Override browser opening commands to echo URL for detection
-              BROWSER: 'echo "OPEN_URL:"'
-            }
-          });
-          
-          // console.log('🟢 Shell process started with PTY, PID:', shellProcess.pid);
-          
-          // Handle data output
-          shellProcess.onData((data) => {
-            if (ws.readyState === ws.OPEN) {
-              let outputData = data;
-              
-              // Check for various URL opening patterns
-              const patterns = [
-                // Direct browser opening commands
-                /(?:xdg-open|open|start)\s+(https?:\/\/[^\s\x1b\x07]+)/g,
-                // BROWSER environment variable override
-                /OPEN_URL:\s*(https?:\/\/[^\s\x1b\x07]+)/g,
-                // Git and other tools opening URLs
-                /Opening\s+(https?:\/\/[^\s\x1b\x07]+)/gi,
-                // General URL patterns that might be opened
-                /Visit:\s*(https?:\/\/[^\s\x1b\x07]+)/gi,
-                /View at:\s*(https?:\/\/[^\s\x1b\x07]+)/gi,
-                /Browse to:\s*(https?:\/\/[^\s\x1b\x07]+)/gi
-              ];
-              
-              patterns.forEach(pattern => {
-                let match;
-                while ((match = pattern.exec(data)) !== null) {
-                  const url = match[1];
-                  // console.log('🔗 Detected URL for opening:', url);
-                  
-                  // Send URL opening message to client
-                  ws.send(JSON.stringify({
-                    type: 'url_open',
-                    url: url
-                  }));
-                  
-                  // Replace the OPEN_URL pattern with a user-friendly message
-                  if (pattern.source.includes('OPEN_URL')) {
-                    outputData = outputData.replace(match[0], `🌐 Opening in browser: ${url}`);
-                  }
-                }
-              });
-              
-              // Send regular output
-              ws.send(JSON.stringify({
-                type: 'output',
-                data: outputData
-              }));
-            }
-          });
-          
-          // Handle process exit
-          shellProcess.onExit((exitCode) => {
-            // console.log('🔚 Shell process exited with code:', exitCode.exitCode, 'signal:', exitCode.signal);
-            if (ws.readyState === ws.OPEN) {
-              ws.send(JSON.stringify({
-                type: 'output',
-                data: `\r\n\x1b[33mProcess exited with code ${exitCode.exitCode}${exitCode.signal ? ` (${exitCode.signal})` : ''}\x1b[0m\r\n`
-              }));
-            }
-            shellProcess = null;
-          });
-          
-        } catch (spawnError) {
-          // console.error('❌ Error spawning process:', spawnError);
-          ws.send(JSON.stringify({
-            type: 'output',
-            data: `\r\n\x1b[31mError: ${spawnError.message}\x1b[0m\r\n`
-          }));
-        }
-        
-      } else if (data.type === 'input') {
-        // Send input to shell process
-        if (shellProcess && shellProcess.write) {
-          try {
-            shellProcess.write(data.data);
-          } catch (error) {
-            // console.error('Error writing to shell:', error);
-          }
-        } else {
-          // console.warn('No active shell process to send input to');
-        }
-      } else if (data.type === 'resize') {
-        // Handle terminal resize
-        if (shellProcess && shellProcess.resize) {
-          // console.log('Terminal resize requested:', data.cols, 'x', data.rows);
-          shellProcess.resize(data.cols, data.rows);
-        }
-      }
-    } catch (error) {
-      // console.error('❌ Shell WebSocket error:', error.message);
-      if (ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify({
-          type: 'output',
-          data: `\r\n\x1b[31mError: ${error.message}\x1b[0m\r\n`
-        }));
-      }
-    }
-  });
-  
-  ws.on('close', () => {
-    // console.log('🔌 Shell client disconnected');
-    if (shellProcess && shellProcess.kill) {
-      // console.log('🔴 Killing shell process:', shellProcess.pid);
-      shellProcess.kill();
-    }
-  });
-  
-  ws.on('error', (error) => {
-    // console.error('❌ Shell WebSocket error:', error);
-  });
-}
 // Audio transcription endpoint
 app.post('/api/transcribe', authenticateToken, async (req, res) => {
   try {
@@ -915,87 +1003,6 @@ app.post('/api/projects/:projectName/upload-images', authenticateToken, async (r
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../dist/index.html'));
 });
-
-// Helper function to convert permissions to rwx format
-function permToRwx(perm) {
-  const r = perm & 4 ? 'r' : '-';
-  const w = perm & 2 ? 'w' : '-';
-  const x = perm & 1 ? 'x' : '-';
-  return r + w + x;
-}
-
-async function getFileTree(dirPath, maxDepth = 3, currentDepth = 0, showHidden = true) {
-  // Using fsPromises from import
-  const items = [];
-  
-  try {
-    const entries = await fsPromises.readdir(dirPath, { withFileTypes: true });
-    
-    for (const entry of entries) {
-      // Debug: log all entries including hidden files
-   
-      
-      // Skip only heavy build directories
-      if (entry.name === 'node_modules' || 
-          entry.name === 'dist' || 
-          entry.name === 'build') continue;
-      
-      const itemPath = path.join(dirPath, entry.name);
-      const item = {
-        name: entry.name,
-        path: itemPath,
-        type: entry.isDirectory() ? 'directory' : 'file'
-      };
-      
-      // Get file stats for additional metadata
-      try {
-        const stats = await fsPromises.stat(itemPath);
-        item.size = stats.size;
-        item.modified = stats.mtime.toISOString();
-        
-        // Convert permissions to rwx format
-        const mode = stats.mode;
-        const ownerPerm = (mode >> 6) & 7;
-        const groupPerm = (mode >> 3) & 7;
-        const otherPerm = mode & 7;
-        item.permissions = ((mode >> 6) & 7).toString() + ((mode >> 3) & 7).toString() + (mode & 7).toString();
-        item.permissionsRwx = permToRwx(ownerPerm) + permToRwx(groupPerm) + permToRwx(otherPerm);
-      } catch (statError) {
-        // If stat fails, provide default values
-        item.size = 0;
-        item.modified = null;
-        item.permissions = '000';
-        item.permissionsRwx = '---------';
-      }
-      
-      if (entry.isDirectory() && currentDepth < maxDepth) {
-        // Recursively get subdirectories but limit depth
-        try {
-          // Check if we can access the directory before trying to read it
-          await fsPromises.access(item.path, fs.constants.R_OK);
-          item.children = await getFileTree(item.path, maxDepth, currentDepth + 1, showHidden);
-        } catch (e) {
-          // Silently skip directories we can't access (permission denied, etc.)
-          item.children = [];
-        }
-      }
-      
-      items.push(item);
-    }
-  } catch (error) {
-    // Only log non-permission errors to avoid spam
-    if (error.code !== 'EACCES' && error.code !== 'EPERM') {
-      // console.error('Error reading directory:', error);
-    }
-  }
-  
-  return items.sort((a, b) => {
-    if (a.type !== b.type) {
-      return a.type === 'directory' ? -1 : 1;
-    }
-    return a.name.localeCompare(b.name);
-  });
-}
 
 const PORT = process.env.PORT || 4008;
 

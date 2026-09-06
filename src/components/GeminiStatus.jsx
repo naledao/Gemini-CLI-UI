@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { cn } from '../lib/utils';
+import { useLanguage } from '../contexts/LanguageContext';
 
 function GeminiStatus({ status, onAbort, isLoading }) {
   const [elapsedTime, setElapsedTime] = useState(0);
   const [animationPhase, setAnimationPhase] = useState(0);
+  const { t, language } = useLanguage();
   
   // Update elapsed time every second
   useEffect(() => {
@@ -35,7 +37,9 @@ function GeminiStatus({ status, onAbort, isLoading }) {
   if (!isLoading) return null;
   
   // Clever action words that cycle
-  const actionWords = ['Thinking', 'Processing', 'Analyzing', 'Working', 'Computing', 'Reasoning'];
+  const actionWordsEn = ['Thinking', 'Processing', 'Analyzing', 'Working', 'Computing', 'Reasoning'];
+  const actionWordsZh = ['思考中', '处理中', '分析中', '执行中', '计算中', '推理中'];
+  const actionWords = language === 'zh' ? actionWordsZh : actionWordsEn;
   const actionIndex = Math.floor(elapsedTime / 3) % actionWords.length;
   
   // Parse status data
@@ -72,13 +76,18 @@ function GeminiStatus({ status, onAbort, isLoading }) {
         {/* Interrupt button */}
         {canInterrupt && onAbort && (
           <button
-            onClick={onAbort}
-            className="ml-3 text-xs bg-red-600 hover:bg-red-700 text-white px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-md transition-colors flex items-center gap-1.5 flex-shrink-0"
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onAbort();
+            }}
+            className="ml-3 text-xs bg-red-600 hover:bg-red-700 active:bg-red-800 text-white px-3 py-1.5 rounded-md transition-all flex items-center gap-1.5 flex-shrink-0 cursor-pointer shadow-md hover:shadow-lg active:scale-95"
           >
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
-            <span className="hidden sm:inline">Stop</span>
+            <span className="font-medium">{language === 'zh' ? '停止' : 'Stop'}</span>
           </button>
         )}
       </div>

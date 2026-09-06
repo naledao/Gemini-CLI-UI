@@ -21,14 +21,17 @@ import ReactMarkdown from 'react-markdown';
 import { useDropzone } from 'react-dropzone';
 import TodoList from './TodoList';
 import GeminiLogo from './GeminiLogo.jsx';
+import { Sparkles, Square } from 'lucide-react';
 import { EnhancedMessageRenderer } from './EnhancedMessageRenderer';
-import GeminiStatus from './GeminiStatus';
+import ToolCallRenderer from './ToolCallRenderer';
 import { MicButton } from './MicButton.jsx';
 import { api } from '../utils/api';
 import { playNotificationSound } from '../utils/notificationSound';
+import { useLanguage } from '../contexts/LanguageContext';
 
 // Memoized message component to prevent unnecessary re-renders
 const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFileOpen, onShowSettings, autoExpandTools, showRawParameters }) => {
+  const { t, language } = useLanguage();
   const isGrouped = prevMessage && prevMessage.type === message.type && 
                    prevMessage.type === 'assistant' && 
                    !prevMessage.isToolUse && !message.isToolUse;
@@ -127,664 +130,12 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
           
           <div className="w-full">
             
-            {message.isToolUse && !['Read', 'TodoWrite', 'TodoRead'].includes(message.toolName) ? (
-              <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-2 sm:p-3 mb-2">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <div className="w-5 h-5 bg-blue-600 rounded flex items-center justify-center">
-                      <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                      </svg>
-                    </div>
-                    <span className="font-medium text-blue-900 dark:text-blue-100">
-                      Using {message.toolName}
-                    </span>
-                    <span className="text-xs text-blue-600 dark:text-blue-400 font-mono">
-                      {message.toolId}
-                    </span>
-                  </div>
-                  {onShowSettings && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onShowSettings();
-                      }}
-                      className="p-1 rounded hover:bg-blue-200 dark:hover:bg-blue-800 transition-colors"
-                      title="Tool Settings"
-                    >
-                      <svg className="w-4 h-4 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                      </svg>
-                    </button>
-                  )}
-                </div>
-                {message.toolInput && message.toolName === 'Edit' && (() => {
-                  try {
-                    const input = JSON.parse(message.toolInput);
-                    if (input.file_path && input.old_string && input.new_string) {
-                      return (
-                        <details className="mt-2" open={autoExpandTools}>
-                          <summary className="text-sm text-blue-700 dark:text-blue-300 cursor-pointer hover:text-blue-800 dark:hover:text-blue-200 flex items-center gap-2">
-                            <svg className="w-4 h-4 transition-transform details-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                            </svg>
-                            📝 View edit diff for 
-                            <button 
-                              onClick={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                onFileOpen && onFileOpen(input.file_path, {
-                                  old_string: input.old_string,
-                                  new_string: input.new_string
-                                });
-                              }}
-                              className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 underline font-mono"
-                            >
-                              {input.file_path.split('/').pop()}
-                            </button>
-                          </summary>
-                          <div className="mt-3">
-                            <div className="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
-                              <div className="flex items-center justify-between px-3 py-2 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-                                <button 
-                                  onClick={() => onFileOpen && onFileOpen(input.file_path, {
-                                    old_string: input.old_string,
-                                    new_string: input.new_string
-                                  })}
-                                  className="text-xs font-mono text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 truncate underline cursor-pointer"
-                                >
-                                  {input.file_path}
-                                </button>
-                                <span className="text-xs text-gray-500 dark:text-gray-400">
-                                  Diff
-                                </span>
-                              </div>
-                              <div className="text-xs font-mono">
-                                {createDiff(input.old_string, input.new_string).map((diffLine, i) => (
-                                  <div key={i} className="flex">
-                                    <span className={`w-8 text-center border-r ${
-                                      diffLine.type === 'removed' 
-                                        ? 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border-red-200 dark:border-red-800'
-                                        : 'bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 border-green-200 dark:border-green-800'
-                                    }`}>
-                                      {diffLine.type === 'removed' ? '-' : '+'}
-                                    </span>
-                                    <span className={`px-2 py-0.5 flex-1 whitespace-pre-wrap ${
-                                      diffLine.type === 'removed'
-                                        ? 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200'
-                                        : 'bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-200'
-                                    }`}>
-                                      {diffLine.content}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                            {showRawParameters && (
-                              <details className="mt-2" open={autoExpandTools}>
-                                <summary className="text-xs text-blue-600 dark:text-blue-400 cursor-pointer hover:text-blue-700 dark:hover:text-blue-300">
-                                  View raw parameters
-                                </summary>
-                                <pre className="mt-2 text-xs bg-blue-100 dark:bg-blue-800/30 p-2 rounded whitespace-pre-wrap break-words overflow-hidden text-blue-900 dark:text-blue-100">
-                                  {message.toolInput}
-                                </pre>
-                              </details>
-                            )}
-                          </div>
-                        </details>
-                      );
-                    }
-                  } catch (e) {
-                    // Fall back to raw display if parsing fails
-                  }
-                  return (
-                    <details className="mt-2" open={autoExpandTools}>
-                      <summary className="text-sm text-blue-700 dark:text-blue-300 cursor-pointer hover:text-blue-800 dark:hover:text-blue-200">
-                        View input parameters
-                      </summary>
-                      <pre className="mt-2 text-xs bg-blue-100 dark:bg-blue-800/30 p-2 rounded whitespace-pre-wrap break-words overflow-hidden text-blue-900 dark:text-blue-100">
-                        {message.toolInput}
-                      </pre>
-                    </details>
-                  );
-                })()}
-                {message.toolInput && message.toolName !== 'Edit' && (() => {
-                  // Debug log to see what we're dealing with
-                  // Debug - Tool display
-                  
-                  // Special handling for Write tool
-                  if (message.toolName === 'Write') {
-                    // Debug - Write tool detected
-                    try {
-                      let input;
-                      // Handle both JSON string and already parsed object
-                      if (typeof message.toolInput === 'string') {
-                        input = JSON.parse(message.toolInput);
-                      } else {
-                        input = message.toolInput;
-                      }
-                      
-                      // Debug - Parsed Write input
-                      
-                      if (input.file_path && input.content !== undefined) {
-                        return (
-                          <details className="mt-2" open={autoExpandTools}>
-                            <summary className="text-sm text-blue-700 dark:text-blue-300 cursor-pointer hover:text-blue-800 dark:hover:text-blue-200 flex items-center gap-2">
-                              <svg className="w-4 h-4 transition-transform details-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                              </svg>
-                              📄 Creating new file: 
-                              <button 
-                                onClick={(e) => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  onFileOpen && onFileOpen(input.file_path, {
-                                    old_string: '',
-                                    new_string: input.content
-                                  });
-                                }}
-                                className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 underline font-mono"
-                              >
-                                {input.file_path.split('/').pop()}
-                              </button>
-                            </summary>
-                            <div className="mt-3">
-                              <div className="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
-                                <div className="flex items-center justify-between px-3 py-2 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-                                  <button 
-                                    onClick={() => onFileOpen && onFileOpen(input.file_path, {
-                                      old_string: '',
-                                      new_string: input.content
-                                    })}
-                                    className="text-xs font-mono text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 truncate underline cursor-pointer"
-                                  >
-                                    {input.file_path}
-                                  </button>
-                                  <span className="text-xs text-gray-500 dark:text-gray-400">
-                                    New File
-                                  </span>
-                                </div>
-                                <div className="text-xs font-mono">
-                                  {createDiff('', input.content).map((diffLine, i) => (
-                                    <div key={i} className="flex">
-                                      <span className={`w-8 text-center border-r ${
-                                        diffLine.type === 'removed' 
-                                          ? 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border-red-200 dark:border-red-800'
-                                          : 'bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 border-green-200 dark:border-green-800'
-                                      }`}>
-                                        {diffLine.type === 'removed' ? '-' : '+'}
-                                      </span>
-                                      <span className={`px-2 py-0.5 flex-1 whitespace-pre-wrap ${
-                                        diffLine.type === 'removed'
-                                          ? 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200'
-                                          : 'bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-200'
-                                      }`}>
-                                        {diffLine.content}
-                                      </span>
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                              {showRawParameters && (
-                                <details className="mt-2" open={autoExpandTools}>
-                                  <summary className="text-xs text-blue-600 dark:text-blue-400 cursor-pointer hover:text-blue-700 dark:hover:text-blue-300">
-                                    View raw parameters
-                                  </summary>
-                                  <pre className="mt-2 text-xs bg-blue-100 dark:bg-blue-800/30 p-2 rounded whitespace-pre-wrap break-words overflow-hidden text-blue-900 dark:text-blue-100">
-                                    {message.toolInput}
-                                  </pre>
-                                </details>
-                              )}
-                            </div>
-                          </details>
-                        );
-                      }
-                    } catch (e) {
-                      // Fall back to regular display
-                    }
-                  }
-                  
-                  // Special handling for TodoWrite tool
-                  if (message.toolName === 'TodoWrite') {
-                    try {
-                      const input = JSON.parse(message.toolInput);
-                      if (input.todos && Array.isArray(input.todos)) {
-                        return (
-                          <details className="mt-2" open={autoExpandTools}>
-                            <summary className="text-sm text-blue-700 dark:text-blue-300 cursor-pointer hover:text-blue-800 dark:hover:text-blue-200 flex items-center gap-2">
-                              <svg className="w-4 h-4 transition-transform details-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                              </svg>
-                              Updating Todo List
-                            </summary>
-                            <div className="mt-3">
-                              <TodoList todos={input.todos} />
-                              {showRawParameters && (
-                                <details className="mt-3" open={autoExpandTools}>
-                                  <summary className="text-xs text-blue-600 dark:text-blue-400 cursor-pointer hover:text-blue-700 dark:hover:text-blue-300">
-                                    View raw parameters
-                                  </summary>
-                                  <pre className="mt-2 text-xs bg-blue-100 dark:bg-blue-800/30 p-2 rounded overflow-x-auto text-blue-900 dark:text-blue-100">
-                                    {message.toolInput}
-                                  </pre>
-                                </details>
-                              )}
-                            </div>
-                          </details>
-                        );
-                      }
-                    } catch (e) {
-                      // Fall back to regular display
-                    }
-                  }
-                  
-                  // Special handling for Bash tool
-                  if (message.toolName === 'Bash') {
-                    try {
-                      const input = JSON.parse(message.toolInput);
-                      return (
-                        <details className="mt-2" open={autoExpandTools}>
-                          <summary className="text-sm text-blue-700 dark:text-blue-300 cursor-pointer hover:text-blue-800 dark:hover:text-blue-200 flex items-center gap-2">
-                            <svg className="w-4 h-4 transition-transform details-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                            </svg>
-                            Running command
-                          </summary>
-                          <div className="mt-3 space-y-2">
-                            <div className="bg-gray-900 dark:bg-gray-950 text-gray-100 rounded-lg p-3 font-mono text-sm">
-                              <div className="flex items-center gap-2 mb-2 text-gray-400">
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                                </svg>
-                                <span className="text-xs">Terminal</span>
-                              </div>
-                              <div className="whitespace-pre-wrap break-all text-green-400">
-                                $ {input.command}
-                              </div>
-                            </div>
-                            {input.description && (
-                              <div className="text-xs text-gray-600 dark:text-gray-400 italic">
-                                {input.description}
-                              </div>
-                            )}
-                            {showRawParameters && (
-                              <details className="mt-2">
-                                <summary className="text-xs text-blue-600 dark:text-blue-400 cursor-pointer hover:text-blue-700 dark:hover:text-blue-300">
-                                  View raw parameters
-                                </summary>
-                                <pre className="mt-2 text-xs bg-blue-100 dark:bg-blue-800/30 p-2 rounded whitespace-pre-wrap break-words overflow-hidden text-blue-900 dark:text-blue-100">
-                                  {message.toolInput}
-                                </pre>
-                              </details>
-                            )}
-                          </div>
-                        </details>
-                      );
-                    } catch (e) {
-                      // Fall back to regular display
-                    }
-                  }
-                  
-                  // Special handling for Read tool
-                  if (message.toolName === 'Read') {
-                    try {
-                      const input = JSON.parse(message.toolInput);
-                      if (input.file_path) {
-                        const filename = input.file_path.split('/').pop();
-                        
-                        return (
-                          <div className="mt-2 text-sm text-blue-700 dark:text-blue-300">
-                            Read{' '}
-                            <button 
-                              onClick={() => onFileOpen && onFileOpen(input.file_path)}
-                              className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 underline font-mono"
-                            >
-                              {filename}
-                            </button>
-                          </div>
-                        );
-                      }
-                    } catch (e) {
-                      // Fall back to regular display
-                    }
-                  }
-                  
-                  // Special handling for exit_plan_mode tool
-                  if (message.toolName === 'exit_plan_mode') {
-                    try {
-                      const input = JSON.parse(message.toolInput);
-                      if (input.plan) {
-                        // Replace escaped newlines with actual newlines
-                        const planContent = input.plan.replace(/\\n/g, '\n');
-                        return (
-                          <details className="mt-2" open={autoExpandTools}>
-                            <summary className="text-sm text-blue-700 dark:text-blue-300 cursor-pointer hover:text-blue-800 dark:hover:text-blue-200 flex items-center gap-2">
-                              <svg className="w-4 h-4 transition-transform details-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                              </svg>
-                              📋 View implementation plan
-                            </summary>
-                            <div className="mt-3 prose prose-sm max-w-none dark:prose-invert">
-                              <ReactMarkdown>{planContent}</ReactMarkdown>
-                            </div>
-                          </details>
-                        );
-                      }
-                    } catch (e) {
-                      // Fall back to regular display
-                    }
-                  }
-                  
-                  // Regular tool input display for other tools
-                  return (
-                    <details className="mt-2" open={autoExpandTools}>
-                      <summary className="text-sm text-blue-700 dark:text-blue-300 cursor-pointer hover:text-blue-800 dark:hover:text-blue-200 flex items-center gap-2">
-                        <svg className="w-4 h-4 transition-transform details-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                        </svg>
-                        View input parameters
-                      </summary>
-                      <pre className="mt-2 text-xs bg-blue-100 dark:bg-blue-800/30 p-2 rounded whitespace-pre-wrap break-words overflow-hidden text-blue-900 dark:text-blue-100">
-                        {message.toolInput}
-                      </pre>
-                    </details>
-                  );
-                })()}
-                
-                {/* Tool Result Section */}
-                {message.toolResult && (
-                  <div className="mt-3 border-t border-blue-200 dark:border-blue-700 pt-3">
-                    <div className="flex items-center gap-2 mb-2">
-                      <div className={`w-4 h-4 rounded flex items-center justify-center ${
-                        message.toolResult.isError 
-                          ? 'bg-red-500' 
-                          : 'bg-green-500'
-                      }`}>
-                        <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          {message.toolResult.isError ? (
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                          ) : (
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                          )}
-                        </svg>
-                      </div>
-                      <span className={`text-sm font-medium ${
-                        message.toolResult.isError 
-                          ? 'text-red-700 dark:text-red-300' 
-                          : 'text-green-700 dark:text-green-300'
-                      }`}>
-                        {message.toolResult.isError ? 'Tool Error' : 'Tool Result'}
-                      </span>
-                    </div>
-                    
-                    <div className={`text-sm ${
-                      message.toolResult.isError 
-                        ? 'text-red-800 dark:text-red-200' 
-                        : 'text-green-800 dark:text-green-200'
-                    }`}>
-                      {(() => {
-                        const content = String(message.toolResult.content || '');
-                        
-                        // Special handling for TodoWrite/TodoRead results
-                        if ((message.toolName === 'TodoWrite' || message.toolName === 'TodoRead') &&
-                            (content.includes('Todos have been modified successfully') || 
-                             content.includes('Todo list') || 
-                             (content.startsWith('[') && content.includes('"content"') && content.includes('"status"')))) {
-                          try {
-                            // Try to parse if it looks like todo JSON data
-                            let todos = null;
-                            if (content.startsWith('[')) {
-                              todos = JSON.parse(content);
-                            } else if (content.includes('Todos have been modified successfully')) {
-                              // For TodoWrite success messages, we don't have the data in the result
-                              return (
-                                <div>
-                                  <div className="flex items-center gap-2 mb-2">
-                                    <span className="font-medium">Todo list has been updated successfully</span>
-                                  </div>
-                                </div>
-                              );
-                            }
-                            
-                            if (todos && Array.isArray(todos)) {
-                              return (
-                                <div>
-                                  <div className="flex items-center gap-2 mb-3">
-                                    <span className="font-medium">Current Todo List</span>
-                                  </div>
-                                  <TodoList todos={todos} isResult={true} />
-                                </div>
-                              );
-                            }
-                          } catch (e) {
-                            // Fall through to regular handling
-                          }
-                        }
-
-                        // Special handling for exit_plan_mode tool results
-                        if (message.toolName === 'exit_plan_mode') {
-                          try {
-                            // The content should be JSON with a "plan" field
-                            const parsed = JSON.parse(content);
-                            if (parsed.plan) {
-                              // Replace escaped newlines with actual newlines
-                              const planContent = parsed.plan.replace(/\\n/g, '\n');
-                              return (
-                                <div>
-                                  <div className="flex items-center gap-2 mb-3">
-                                    <span className="font-medium">Implementation Plan</span>
-                                  </div>
-                                  <div className="prose prose-sm max-w-none dark:prose-invert">
-                                    <ReactMarkdown>{planContent}</ReactMarkdown>
-                                  </div>
-                                </div>
-                              );
-                            }
-                          } catch (e) {
-                            // Fall through to regular handling
-                          }
-                        }
-
-                        // Special handling for interactive prompts
-                        if (content.includes('Do you want to proceed?') && message.toolName === 'Bash') {
-                          const lines = content.split('\n');
-                          const promptIndex = lines.findIndex(line => line.includes('Do you want to proceed?'));
-                          const beforePrompt = lines.slice(0, promptIndex).join('\n');
-                          const promptLines = lines.slice(promptIndex);
-                          
-                          // Extract the question and options
-                          const questionLine = promptLines.find(line => line.includes('Do you want to proceed?')) || '';
-                          const options = [];
-                          
-                          // Parse numbered options (1. Yes, 2. No, etc.)
-                          promptLines.forEach(line => {
-                            const optionMatch = line.match(/^\s*(\d+)\.\s+(.+)$/);
-                            if (optionMatch) {
-                              options.push({
-                                number: optionMatch[1],
-                                text: optionMatch[2].trim()
-                              });
-                            }
-                          });
-                          
-                          // Find which option was selected (usually indicated by "> 1" or similar)
-                          const selectedMatch = content.match(/>\s*(\d+)/);
-                          const selectedOption = selectedMatch ? selectedMatch[1] : null;
-                          
-                          return (
-                            <div className="space-y-3">
-                              {beforePrompt && (
-                                <div className="bg-gray-900 dark:bg-gray-950 text-gray-100 rounded-lg p-3 font-mono text-xs overflow-x-auto">
-                                  <pre className="whitespace-pre-wrap break-words">{beforePrompt}</pre>
-                                </div>
-                              )}
-                              <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-4">
-                                <div className="flex items-start gap-3">
-                                  <div className="w-8 h-8 bg-amber-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
-                                    <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                    </svg>
-                                  </div>
-                                  <div className="flex-1">
-                                    <h4 className="font-semibold text-amber-900 dark:text-amber-100 text-base mb-2">
-                                      Interactive Prompt
-                                    </h4>
-                                    <p className="text-sm text-amber-800 dark:text-amber-200 mb-4">
-                                      {questionLine}
-                                    </p>
-                                    
-                                    {/* Option buttons */}
-                                    <div className="space-y-2 mb-4">
-                                      {options.map((option) => (
-                                        <button
-                                          key={option.number}
-                                          className={`w-full text-left px-4 py-3 rounded-lg border-2 transition-all ${
-                                            selectedOption === option.number
-                                              ? 'bg-amber-600 dark:bg-amber-700 text-white border-amber-600 dark:border-amber-700 shadow-md'
-                                              : 'bg-white dark:bg-gray-800 text-amber-900 dark:text-amber-100 border-amber-300 dark:border-amber-700 hover:border-amber-400 dark:hover:border-amber-600 hover:shadow-sm'
-                                          } ${
-                                            selectedOption ? 'cursor-default' : 'cursor-not-allowed opacity-75'
-                                          }`}
-                                          disabled
-                                        >
-                                          <div className="flex items-center gap-3">
-                                            <span className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
-                                              selectedOption === option.number
-                                                ? 'bg-white/20'
-                                                : 'bg-amber-100 dark:bg-amber-800/50'
-                                            }`}>
-                                              {option.number}
-                                            </span>
-                                            <span className="text-sm sm:text-base font-medium flex-1">
-                                              {option.text}
-                                            </span>
-                                            {selectedOption === option.number && (
-                                              <svg className="w-5 h-5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                                                <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                                              </svg>
-                                            )}
-                                          </div>
-                                        </button>
-                                      ))}
-                                    </div>
-                                    
-                                    {selectedOption && (
-                                      <div className="bg-amber-100 dark:bg-amber-800/30 rounded-lg p-3">
-                                        <p className="text-amber-900 dark:text-amber-100 text-sm font-medium mb-1">
-                                          ✓ Gemini selected option {selectedOption}
-                                        </p>
-                                        <p className="text-amber-800 dark:text-amber-200 text-xs">
-                                          In the CLI, you would select this option interactively using arrow keys or by typing the number.
-                                        </p>
-                                      </div>
-                                    )}
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        }
-                        
-                        const fileEditMatch = content.match(/The file (.+?) has been updated\./);
-                        if (fileEditMatch) {
-                          return (
-                            <div>
-                              <div className="flex items-center gap-2 mb-2">
-                                <span className="font-medium">File updated successfully</span>
-                              </div>
-                              <button 
-                                onClick={() => onFileOpen && onFileOpen(fileEditMatch[1])}
-                                className="text-xs font-mono bg-green-100 dark:bg-green-800/30 px-2 py-1 rounded text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 underline cursor-pointer"
-                              >
-                                {fileEditMatch[1]}
-                              </button>
-                            </div>
-                          );
-                        }
-                        
-                        // Handle Write tool output for file creation
-                        const fileCreateMatch = content.match(/(?:The file|File) (.+?) has been (?:created|written)(?: successfully)?\.?/);
-                        if (fileCreateMatch) {
-                          return (
-                            <div>
-                              <div className="flex items-center gap-2 mb-2">
-                                <span className="font-medium">File created successfully</span>
-                              </div>
-                              <button 
-                                onClick={() => onFileOpen && onFileOpen(fileCreateMatch[1])}
-                                className="text-xs font-mono bg-green-100 dark:bg-green-800/30 px-2 py-1 rounded text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 underline cursor-pointer"
-                              >
-                                {fileCreateMatch[1]}
-                              </button>
-                            </div>
-                          );
-                        }
-                        
-                        // Special handling for Write tool - hide content if it's just the file content
-                        if (message.toolName === 'Write' && !message.toolResult.isError) {
-                          // For Write tool, the diff is already shown in the tool input section
-                          // So we just show a success message here
-                          return (
-                            <div className="text-green-700 dark:text-green-300">
-                              <div className="flex items-center gap-2">
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                </svg>
-                                <span className="font-medium">File written successfully</span>
-                              </div>
-                              <p className="text-xs mt-1 text-green-600 dark:text-green-400">
-                                The file content is displayed in the diff view above
-                              </p>
-                            </div>
-                          );
-                        }
-                        
-                        if (content.includes('cat -n') && content.includes('→')) {
-                          return (
-                            <details open={autoExpandTools}>
-                              <summary className="text-sm text-green-700 dark:text-green-300 cursor-pointer hover:text-green-800 dark:hover:text-green-200 mb-2 flex items-center gap-2">
-                                <svg className="w-4 h-4 transition-transform details-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                                </svg>
-                                View file content
-                              </summary>
-                              <div className="mt-2 bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
-                                <div className="text-xs font-mono p-3 whitespace-pre-wrap break-words overflow-hidden">
-                                  {content}
-                                </div>
-                              </div>
-                            </details>
-                          );
-                        }
-                        
-                        if (content.length > 300) {
-                          return (
-                            <details open={autoExpandTools}>
-                              <summary className="text-sm text-green-700 dark:text-green-300 cursor-pointer hover:text-green-800 dark:hover:text-green-200 mb-2 flex items-center gap-2">
-                                <svg className="w-4 h-4 transition-transform details-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                                </svg>
-                                View full output ({content.length} chars)
-                              </summary>
-                              <div className="mt-2 prose prose-sm max-w-none prose-green dark:prose-invert">
-                                <ReactMarkdown>{content}</ReactMarkdown>
-                              </div>
-                            </details>
-                          );
-                        }
-                        
-                        return (
-                          <div className="prose prose-sm max-w-none prose-green dark:prose-invert">
-                            <ReactMarkdown>{content}</ReactMarkdown>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  </div>
-                )}
-              </div>
+            {message.isToolUse ? (
+              <ToolCallRenderer
+                message={message}
+                onFileOpen={onFileOpen}
+                autoExpandTools={autoExpandTools}
+              />
             ) : message.isInteractivePrompt ? (
               // Special handling for interactive prompts
               <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-4">
@@ -1007,6 +358,7 @@ const ImageAttachment = ({ file, onRemove, uploadProgress, error }) => {
 //
 // This ensures uninterrupted chat experience by pausing sidebar refreshes during conversations.
 function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, messages, onFileOpen, onInputFocusChange, onSessionActive, onSessionInactive, onReplaceTemporarySession, onNavigateToSession, onShowSettings, autoExpandTools, showRawParameters, autoScrollToBottom }) {
+  const { t, language } = useLanguage();
   const [input, setInput] = useState(() => {
     if (typeof window !== 'undefined' && selectedProject) {
       return localStorage.getItem(`draft_input_${selectedProject.name}`) || '';
@@ -1024,22 +376,6 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   const [currentSessionId, setCurrentSessionId] = useState(null);
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [sessionMessages, setSessionMessages] = useState([]);
-  const [isYoloMode, setIsYoloMode] = useState(() => {
-    try {
-      const settings = JSON.parse(localStorage.getItem('gemini-tools-settings') || '{}');
-      return settings.skipPermissions || false;
-    } catch (e) {
-      return false;
-    }
-  });
-  const [selectedModel, setSelectedModel] = useState(() => {
-    try {
-      const settings = JSON.parse(localStorage.getItem('gemini-tools-settings') || '{}');
-      return settings.selectedModel || 'gemini-2.5-flash';
-    } catch (e) {
-      return 'gemini-2.5-flash';
-    }
-  });
   const [isLoadingSessionMessages, setIsLoadingSessionMessages] = useState(false);
   const [isSystemSessionChange, setIsSystemSessionChange] = useState(false);
   const [permissionMode, setPermissionMode] = useState('default');
@@ -1067,6 +403,77 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   const [slashPosition, setSlashPosition] = useState(-1);
   const [visibleMessageCount, setVisibleMessageCount] = useState(100);
   const [geminiStatus, setGeminiStatus] = useState(null);
+  const [sessionModel, setSessionModel] = useState('gemini-3.8-flash');
+  const [thinkingLevel, setThinkingLevel] = useState('HIGH');
+  const [elapsedTime, setElapsedTime] = useState(0);
+  const [animationPhase, setAnimationPhase] = useState(0);
+
+  // Update elapsed time every second while loading
+  useEffect(() => {
+    if (!isLoading) {
+      setElapsedTime(0);
+      return;
+    }
+
+    const startTime = Date.now();
+    const timer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      setElapsedTime(elapsed);
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [isLoading]);
+
+  // Animate the status indicator phase
+  useEffect(() => {
+    if (!isLoading) return;
+
+    const timer = setInterval(() => {
+      setAnimationPhase(prev => (prev + 1) % 4);
+    }, 500);
+
+    return () => clearInterval(timer);
+  }, [isLoading]);
+
+  // Derive cycling action words and status display
+  const actionWordsEn = useMemo(() => ['Thinking', 'Processing', 'Analyzing', 'Working', 'Computing', 'Reasoning'], []);
+  const actionWordsZh = useMemo(() => ['思考中', '处理中', '分析中', '执行中', '计算中', '推理中'], []);
+  const actionWords = language === 'zh' ? actionWordsZh : actionWordsEn;
+  const actionIndex = Math.floor(elapsedTime / 3) % actionWords.length;
+  const statusText = geminiStatus?.text || actionWords[actionIndex];
+  const spinners = ['✻', '✹', '✸', '✶'];
+  const currentSpinner = spinners[animationPhase];
+
+  // Refocus textarea when loading completes
+  const prevLoadingRef = useRef(isLoading);
+  useEffect(() => {
+    if (prevLoadingRef.current && !isLoading) {
+      setTimeout(() => {
+        textareaRef.current?.focus();
+      }, 50);
+    }
+    prevLoadingRef.current = isLoading;
+  }, [isLoading]);
+
+  // Load local Gemini configuration on mount
+  useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        const token = localStorage.getItem('auth-token');
+        const res = await fetch('/api/config', {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.geminiConfig) {
+            if (data.geminiConfig.model) setSessionModel(data.geminiConfig.model);
+            if (data.geminiConfig.thinkingLevel) setThinkingLevel(data.geminiConfig.thinkingLevel);
+          }
+        }
+      } catch (e) {}
+    };
+    fetchConfig();
+  }, []);
 
 
   // Memoized diff calculation to prevent recalculating on every render
@@ -1371,25 +778,10 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     }
   }, [selectedProject?.name]);
 
-  // Update YOLO mode when settings change
+  // Listen for settings change
   useEffect(() => {
-    const checkSettings = () => {
-      try {
-        const settings = JSON.parse(localStorage.getItem('gemini-tools-settings') || '{}');
-        setIsYoloMode(settings.skipPermissions || false);
-        setSelectedModel(settings.selectedModel || 'gemini-2.5-flash');
-      } catch (e) {
-        setIsYoloMode(false);
-        setSelectedModel('gemini-2.5-flash');
-      }
-    };
-    
-    // Check on mount and when storage changes
-    checkSettings();
-    
     const handleStorageChange = (e) => {
       if (e.key === 'gemini-tools-settings') {
-        checkSettings();
         // Add a system message to notify settings have been applied
         setChatMessages(prev => [...prev, {
           id: `system-${Date.now()}`,
@@ -1402,25 +794,32 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     
     window.addEventListener('storage', handleStorageChange);
     
-    // Also check when component gains focus
-    const handleFocus = () => checkSettings();
-    window.addEventListener('focus', handleFocus);
-    
     return () => {
       window.removeEventListener('storage', handleStorageChange);
-      window.removeEventListener('focus', handleFocus);
     };
   }, []);
 
+  const processedMessageIndexRef = useRef(0);
+
   useEffect(() => {
-    // Handle WebSocket messages
-    if (messages.length > 0) {
-      const latestMessage = messages[messages.length - 1];
-      // console.log('Received WebSocket message:', latestMessage.type, latestMessage);
-      
-      switch (latestMessage.type) {
+    // Handle all new WebSocket messages sequentially to prevent dropping batched deltas
+    if (messages.length < processedMessageIndexRef.current) {
+      processedMessageIndexRef.current = 0;
+    }
+
+    if (messages.length > processedMessageIndexRef.current) {
+      const pendingMessages = messages.slice(processedMessageIndexRef.current);
+      processedMessageIndexRef.current = messages.length;
+
+      const processMessage = (latestMessage) => {
+        if (!latestMessage) return;
+
+        switch (latestMessage.type) {
         case 'session-created':
           // New session created by Gemini CLI - we receive the real session ID here
+          if (latestMessage.model) {
+            setSessionModel(latestMessage.model);
+          }
           // Store it temporarily until conversation completes (prevents premature session association)
           if (latestMessage.sessionId && !currentSessionId) {
             sessionStorage.setItem('pendingSessionId', latestMessage.sessionId);
@@ -1559,6 +958,92 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           }
           break;
           
+        case 'gemini-tool-use':
+          setIsLoading(true);
+          setCanAbortSession(true);
+          const toolData = latestMessage.tool;
+          if (toolData) {
+            const toolInput = toolData.input ? JSON.stringify(toolData.input, null, 2) : '';
+            setChatMessages(prev => [...prev, {
+              type: 'assistant',
+              content: '',
+              timestamp: new Date(),
+              isToolUse: true,
+              toolName: toolData.name,
+              toolInput: toolInput,
+              toolId: toolData.id,
+              toolResult: null
+            }]);
+            setGeminiStatus({
+              text: language === 'zh' ? `正在调用工具: ${toolData.name}` : `Running tool: ${toolData.name}`,
+              can_interrupt: true
+            });
+          }
+          break;
+
+        case 'gemini-tool-result':
+          setIsLoading(true);
+          setCanAbortSession(true);
+          const resData = latestMessage.result;
+          if (resData) {
+            setChatMessages(prev => prev.map(msg => {
+              if (msg.isToolUse && msg.toolId === resData.toolId) {
+                return {
+                  ...msg,
+                  toolResult: {
+                    content: resData.content,
+                    isError: resData.isError,
+                    timestamp: new Date()
+                  }
+                };
+              }
+              return msg;
+            }));
+            setGeminiStatus({
+              text: language === 'zh' ? '思考中' : 'Thinking',
+              can_interrupt: true
+            });
+          }
+          break;
+
+        case 'gemini-delta':
+          setIsLoading(true);
+          setCanAbortSession(true);
+          const chunk = latestMessage.content || '';
+          if (chunk) {
+            setChatMessages(prev => {
+              if (prev.length === 0) {
+                return [{
+                  type: 'assistant',
+                  content: chunk,
+                  timestamp: new Date()
+                }];
+              }
+              const last = prev[prev.length - 1];
+              // If the last message is an assistant text response (not tool use), append to it
+              if (last.type === 'assistant' && !last.isToolUse) {
+                const copy = [...prev];
+                copy[copy.length - 1] = {
+                  ...last,
+                  content: last.content + chunk
+                };
+                return copy;
+              } else {
+                // Otherwise start a new assistant text message block
+                return [...prev, {
+                  type: 'assistant',
+                  content: chunk,
+                  timestamp: new Date()
+                }];
+              }
+            });
+            setGeminiStatus({
+              text: language === 'zh' ? '正在回复' : 'Responding',
+              can_interrupt: true
+            });
+          }
+          break;
+
         case 'gemini-output':
           setChatMessages(prev => [...prev, {
             type: 'assistant',
@@ -1577,10 +1062,11 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           break;
 
         case 'gemini-error':
+        case 'error':
           // console.log('Gemini error, setting isLoading to false:', latestMessage.error);
           setChatMessages(prev => [...prev, {
             type: 'error',
-            content: `Error: ${latestMessage.error}`,
+            content: `Error: ${latestMessage.error || 'Unknown error'}`,
             timestamp: new Date()
           }]);
           setIsLoading(false);
@@ -1616,19 +1102,27 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           if (selectedProject && latestMessage.exitCode === 0) {
             localStorage.removeItem(`chat_messages_${selectedProject.name}`);
           }
+
+          // Auto sync session messages from backend on completion for guaranteed consistency
+          const finalSessionId = currentSessionId || pendingSessionId;
+          if (finalSessionId && selectedProject && latestMessage.exitCode === 0) {
+            setTimeout(() => {
+              loadSessionMessages(selectedProject.name, finalSessionId).catch(() => {});
+            }, 400);
+          }
           break;
-          
-        case 'session-aborted':
+
+          case 'session-aborted':
           setIsLoading(false);
           setCanAbortSession(false);
           setGeminiStatus(null);
-          
+
           // Session Protection: Mark session as inactive when aborted
           // User or system aborted the conversation, re-enable project updates
           if (currentSessionId && onSessionInactive) {
             onSessionInactive(currentSessionId);
           }
-          
+
           setChatMessages(prev => [...prev, {
             type: 'assistant',
             content: 'Session interrupted by user.',
@@ -1636,7 +1130,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           }]);
           break;
 
-        case 'gemini-status':
+          case 'gemini-status':
           // Handle Gemini working status messages
           // Debug - Received gemini-status message
           const statusData = latestMessage.data;
@@ -1647,7 +1141,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
               tokens: 0,
               can_interrupt: true
             };
-            
+
             // Check for different status message formats
             if (statusData.message) {
               statusInfo.text = statusData.message;
@@ -1656,29 +1150,33 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
             } else if (typeof statusData === 'string') {
               statusInfo.text = statusData;
             }
-            
+
             // Extract token count
             if (statusData.tokens) {
               statusInfo.tokens = statusData.tokens;
             } else if (statusData.token_count) {
               statusInfo.tokens = statusData.token_count;
             }
-            
+
             // Check if can interrupt
             if (statusData.can_interrupt !== undefined) {
               statusInfo.can_interrupt = statusData.can_interrupt;
             }
-            
+
             // Debug - Setting claude status
             setGeminiStatus(statusInfo);
             setIsLoading(true);
             setCanAbortSession(statusInfo.can_interrupt);
           }
           break;
-  
-      }
-    }
-  }, [messages]);
+          }
+          };
+
+          for (const msg of pendingMessages) {
+          processMessage(msg);
+          }
+          }
+          }, [messages]);
 
   // Load file list when project changes
   useEffect(() => {
@@ -1776,13 +1274,14 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     }
   });
 
+  // Auto-scroll to bottom when new messages arrive OR during streaming text updates
+  const lastMessageContent = chatMessages[chatMessages.length - 1]?.content;
   useEffect(() => {
-    // Auto-scroll to bottom when new messages arrive
     if (scrollContainerRef.current && chatMessages.length > 0) {
       if (autoScrollToBottom) {
         // If auto-scroll is enabled, always scroll to bottom unless user has manually scrolled up
         if (!isUserScrolledUp) {
-          setTimeout(() => scrollToBottom(), 50); // Small delay to ensure DOM is updated
+          scrollToBottom();
         }
       } else {
         // When auto-scroll is disabled, preserve the visual position
@@ -1798,7 +1297,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         }
       }
     }
-  }, [chatMessages.length, isUserScrolledUp, scrollToBottom, autoScrollToBottom]);
+  }, [chatMessages.length, lastMessageContent, isUserScrolledUp, scrollToBottom, autoScrollToBottom]);
 
   // Scroll to bottom when component mounts with existing messages or when messages first load
   useEffect(() => {
@@ -1995,34 +1494,8 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
       onSessionActive(sessionToActivate);
     }
 
-    // Get tools settings from localStorage
-    const getToolsSettings = () => {
-      try {
-        const savedSettings = localStorage.getItem('gemini-tools-settings');
-        if (savedSettings) {
-          const settings = JSON.parse(savedSettings);
-          return {
-            allowedTools: settings.allowedTools || [],
-            disallowedTools: settings.disallowedTools || [],
-            skipPermissions: settings.skipPermissions || false,
-            selectedModel: settings.selectedModel || 'gemini-2.5-flash'
-          };
-        }
-      } catch (error) {
-        // console.error('Error loading tools settings:', error);
-      }
-      return {
-        allowedTools: [],
-        disallowedTools: [],
-        skipPermissions: false,
-        selectedModel: 'gemini-2.5-flash'
-      };
-    };
-
-    const toolsSettings = getToolsSettings();
-
     // Send command to Gemini CLI via WebSocket with images
-    sendMessage({
+    const sent = sendMessage({
       type: 'gemini-command',
       command: input,
       options: {
@@ -2030,12 +1503,21 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         cwd: selectedProject.path,
         sessionId: currentSessionId,
         resume: !!currentSessionId,
-        toolsSettings: toolsSettings,
-        permissionMode: permissionMode,
-        model: toolsSettings.selectedModel || 'gemini-2.5-flash',
         images: uploadedImages // Pass images to backend
       }
     });
+
+    if (sent === false) {
+      setIsLoading(false);
+      setCanAbortSession(false);
+      setGeminiStatus(null);
+      setChatMessages(prev => [...prev, {
+        type: 'error',
+        content: language === 'zh' ? '网络连接尚未就绪，请等待连接建立后重试' : 'WebSocket connection is not ready. Please wait and try again.',
+        timestamp: new Date()
+      }]);
+      return;
+    }
 
     setInput('');
     setAttachedImages([]);
@@ -2180,12 +1662,25 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   };
   
   const handleAbortSession = () => {
-    if (currentSessionId && canAbortSession) {
-      sendMessage({
-        type: 'abort-session',
-        sessionId: currentSessionId
-      });
-    }
+    console.log('🛑 Aborting session requested by user, sessionId:', currentSessionId);
+    
+    // 1. Immediately reset UI loading state
+    setIsLoading(false);
+    setCanAbortSession(false);
+    setGeminiStatus(null);
+    
+    // 2. Add immediate feedback in chat stream
+    setChatMessages(prev => [...prev, {
+      type: 'system',
+      content: language === 'zh' ? '⏹️ 已手动停止任务' : '⏹️ Task stopped manually',
+      timestamp: new Date()
+    }]);
+
+    // 3. Send abort event to backend
+    sendMessage({
+      type: 'abort-session',
+      sessionId: currentSessionId || selectedSession?.id
+    });
   };
 
   const handleModeSwitch = () => {
@@ -2238,9 +1733,9 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         ) : chatMessages.length === 0 ? (
           <div className="flex items-center justify-center h-full">
             <div className="text-center text-gray-500 dark:text-gray-400 px-6 sm:px-4">
-              <p className="font-bold text-lg sm:text-xl mb-3">Start a conversation with Gemini</p>
+              <p className="font-bold text-lg sm:text-xl mb-3">{t('chat.startConversation')}</p>
               <p className="text-sm sm:text-base leading-relaxed">
-                Ask questions about your code, request changes, or get help with development tasks
+                {t('chat.startDescription')}
               </p>
             </div>
           </div>
@@ -2248,12 +1743,14 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           <>
             {chatMessages.length > visibleMessageCount && (
               <div className="text-center text-gray-500 dark:text-gray-400 text-sm py-2 border-b border-gray-200 dark:border-gray-700">
-                Showing last {visibleMessageCount} messages ({chatMessages.length} total) • 
+                {language === 'zh' 
+                  ? `显示最近 ${visibleMessageCount} 条消息 (共 ${chatMessages.length} 条) • ` 
+                  : `Showing last ${visibleMessageCount} messages (${chatMessages.length} total) • `}
                 <button 
                   className="ml-1 text-blue-600 hover:text-blue-700 underline"
                   onClick={loadEarlierMessages}
                 >
-                  Load earlier messages
+                  {language === 'zh' ? '加载更早消息' : 'Load earlier messages'}
                 </button>
               </div>
             )}
@@ -2293,7 +1790,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
                   <div className="animate-pulse">●</div>
                   <div className="animate-pulse" style={{ animationDelay: '0.2s' }}>●</div>
                   <div className="animate-pulse" style={{ animationDelay: '0.4s' }}>●</div>
-                  <span className="ml-2">Thinking...</span>
+                  <span className="ml-2">{t('chat.thinking')}...</span>
                 </div>
               </div>
             </div>
@@ -2305,28 +1802,36 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
 
 
       {/* Input Area - Fixed Bottom */}
-      <div className={`p-2 sm:p-4 md:p-6 flex-shrink-0 ${
-        isInputFocused ? 'pb-2 sm:pb-4 md:pb-6' : 'pb-16 sm:pb-4 md:pb-6'
-      }`}>
-        {/* Gemini Working Status - positioned above the input form */}
-        <GeminiStatus 
-          status={geminiStatus}
-          isLoading={isLoading}
-          onAbort={handleAbortSession}
-        />
-        
-        {/* Gemini Mode Indicator - Above input */}
+      <div className="p-2 sm:p-4 md:p-6 flex-shrink-0">
+        {/* Gemini Model & Reasoning Effort Indicator (Read-only) */}
         <div className="max-w-4xl mx-auto mb-3">
-          <div className="flex items-center justify-center gap-3">
-            <div className={`px-4 py-1.5 rounded-lg text-sm font-medium border transition-all duration-200 ${
-              isYoloMode 
-                ? 'bg-gradient-to-r from-orange-50 to-red-50 dark:from-orange-900/20 dark:to-red-900/20 text-orange-700 dark:text-orange-300 border-orange-300 dark:border-orange-600'
-                : 'bg-gradient-to-r from-cyan-50 to-blue-50 dark:from-cyan-900/20 dark:to-blue-900/20 text-cyan-700 dark:text-cyan-300 border-cyan-300 dark:border-cyan-600'
-            }`}>
-              <div className="flex items-center gap-2">
-                <div className={`w-2 h-2 rounded-full animate-pulse ${isYoloMode ? 'bg-orange-500' : 'bg-cyan-500'}`} />
-                <span>{isYoloMode ? 'Gemini YOLO' : 'Gemini Default'}</span>
-                <span className="text-xs opacity-75">• {selectedModel}</span>
+          <div className="flex items-center justify-center gap-2">
+            <div className="px-3.5 py-1.5 rounded-lg text-xs font-medium border transition-all duration-200 bg-card/90 dark:bg-gray-850 border-border text-foreground shadow-sm flex items-center gap-2.5 backdrop-blur-sm select-none flex-wrap justify-center">
+              <div className="flex items-center gap-1.5 text-primary font-semibold">
+                <div className="w-2 h-2 rounded-full animate-pulse bg-emerald-500 flex-shrink-0" />
+                <span>Gemini CLI</span>
+              </div>
+              
+              <span className="text-border hidden sm:inline">|</span>
+              
+              <div className="flex items-center gap-1">
+                <span className="text-muted-foreground">{language === 'zh' ? '模型' : 'Model'}:</span>
+                <span className="font-mono font-semibold text-foreground bg-muted px-1.5 py-0.5 rounded">
+                  {sessionModel}
+                </span>
+              </div>
+              
+              <span className="text-border hidden sm:inline">|</span>
+              
+              <div className="flex items-center gap-1">
+                <Sparkles className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
+                <span className="text-muted-foreground">{language === 'zh' ? '推理强度' : 'Reasoning'}:</span>
+                <span className="font-mono font-semibold text-amber-600 dark:text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/20">
+                  {thinkingLevel === 'HIGH' ? (language === 'zh' ? '高 (HIGH)' : 'High') :
+                   thinkingLevel === 'LOW' ? (language === 'zh' ? '低 (LOW)' : 'Low') :
+                   thinkingLevel === 'MEDIUM' ? (language === 'zh' ? '中 (MEDIUM)' : 'Medium') :
+                   thinkingLevel || (language === 'zh' ? '标准' : 'Standard')}
+                </span>
               </div>
             </div>
             
@@ -2335,7 +1840,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
               <button
                 onClick={scrollToBottom}
                 className="w-8 h-8 bg-blue-600 hover:bg-blue-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:ring-offset-gray-800"
-                title="Scroll to bottom"
+                title={language === 'zh' ? '滚到底部' : 'Scroll to bottom'}
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
@@ -2353,7 +1858,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
                 <svg className="w-8 h-8 text-blue-500 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                 </svg>
-                <p className="text-sm font-medium">Drop images here</p>
+                <p className="text-sm font-medium">{t('chat.dropImagesHere')}</p>
               </div>
             </div>
           )}
@@ -2410,34 +1915,47 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           
           <div {...getRootProps()} className={`chat-input-container relative bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-200 dark:border-gray-600 focus-within:ring-2 focus-within:ring-blue-500 dark:focus-within:ring-blue-500 focus-within:border-blue-500 transition-all duration-200 ${isTextareaExpanded ? 'chat-input-expanded' : ''}`}>
             <input {...getInputProps()} />
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={handleInputChange}
-              onClick={handleTextareaClick}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              onFocus={() => setIsInputFocused(true)}
-              onBlur={() => setIsInputFocused(false)}
-              onInput={(e) => {
-                // Immediate resize on input for better UX
-                e.target.style.height = 'auto';
-                e.target.style.height = e.target.scrollHeight + 'px';
-                setCursorPosition(e.target.selectionStart);
-                
-                // Check if textarea is expanded (more than 2 lines worth of height)
-                const lineHeight = parseInt(window.getComputedStyle(e.target).lineHeight);
-                const isExpanded = e.target.scrollHeight > lineHeight * 2;
-                setIsTextareaExpanded(isExpanded);
-              }}
-              placeholder="Ask Gemini to help with your code... (@ to reference files)"
-              disabled={isLoading}
-              rows={1}
-              className="chat-input-placeholder w-full pl-12 pr-28 sm:pr-40 py-3 sm:py-4 bg-transparent rounded-2xl focus:outline-none text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 disabled:opacity-50 resize-none min-h-[40px] sm:min-h-[56px] max-h-[40vh] sm:max-h-[300px] overflow-y-auto text-sm sm:text-base transition-all duration-200"
-              style={{ height: 'auto' }}
-            />
-            {/* Clear button - shown when there's text */}
-            {input.trim() && (
+            {isLoading ? (
+              <div className="w-full pl-12 pr-24 sm:pr-32 py-3 sm:py-4 flex items-center gap-2.5 min-h-[40px] sm:min-h-[56px] select-none">
+                <span className="text-base sm:text-lg text-primary animate-pulse flex-shrink-0">
+                  {currentSpinner}
+                </span>
+                <span className="text-sm sm:text-base font-medium text-gray-800 dark:text-gray-100 truncate">
+                  {statusText}...
+                </span>
+                <span className="text-xs sm:text-sm font-mono text-gray-400 dark:text-gray-500 flex-shrink-0">
+                  ({elapsedTime}s)
+                </span>
+              </div>
+            ) : (
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={handleInputChange}
+                onClick={handleTextareaClick}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                onFocus={() => setIsInputFocused(true)}
+                onBlur={() => setIsInputFocused(false)}
+                onInput={(e) => {
+                  // Immediate resize on input for better UX
+                  e.target.style.height = 'auto';
+                  e.target.style.height = e.target.scrollHeight + 'px';
+                  setCursorPosition(e.target.selectionStart);
+                  
+                  // Check if textarea is expanded (more than 2 lines worth of height)
+                  const lineHeight = parseInt(window.getComputedStyle(e.target).lineHeight);
+                  const isExpanded = e.target.scrollHeight > lineHeight * 2;
+                  setIsTextareaExpanded(isExpanded);
+                }}
+                placeholder={t('chat.inputPlaceholder')}
+                rows={1}
+                className="chat-input-placeholder w-full pl-12 pr-28 sm:pr-40 py-3 sm:py-4 bg-transparent rounded-2xl focus:outline-none text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 resize-none min-h-[40px] sm:min-h-[56px] max-h-[40vh] sm:max-h-[300px] overflow-y-auto text-sm sm:text-base transition-all duration-200"
+                style={{ height: 'auto' }}
+              />
+            )}
+            {/* Clear button - shown when there's text and not loading */}
+            {input.trim() && !isLoading && (
               <button
                 type="button"
                 onClick={(e) => {
@@ -2461,7 +1979,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
                   setIsTextareaExpanded(false);
                 }}
                 className="absolute -left-0.5 -top-3 sm:right-28 sm:left-auto sm:top-1/2 sm:-translate-y-1/2 w-6 h-6 sm:w-8 sm:h-8 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 border border-gray-300 dark:border-gray-600 rounded-full flex items-center justify-center transition-all duration-200 group z-10 shadow-sm"
-                title="Clear input"
+                title={t('chat.clearInput')}
               >
                 <svg 
                   className="w-3 h-3 sm:w-4 sm:h-4 text-gray-600 dark:text-gray-300 group-hover:text-gray-800 dark:group-hover:text-gray-100 transition-colors" 
@@ -2482,8 +2000,11 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
             <button
               type="button"
               onClick={open}
-              className="absolute left-2 bottom-4 p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
-              title="Attach images"
+              disabled={isLoading}
+              className={`absolute left-2 bottom-3 sm:bottom-4 p-2 rounded-lg transition-colors ${
+                isLoading ? 'opacity-40 cursor-not-allowed' : 'hover:bg-gray-100 dark:hover:bg-gray-700'
+              }`}
+              title={t('chat.uploadImages')}
             >
               <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
@@ -2497,43 +2018,68 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
                 className="w-10 h-10 sm:w-10 sm:h-10"
               />
             </div>
-            {/* Send button */}
-            <button
-              type="submit"
-              disabled={!input.trim() || isLoading}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                handleSubmit(e);
-              }}
-              onTouchStart={(e) => {
-                e.preventDefault();
-                handleSubmit(e);
-              }}
-              className="absolute right-2 top-1/2 transform -translate-y-1/2 w-12 h-12 sm:w-12 sm:h-12 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed rounded-full flex items-center justify-center transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:ring-offset-gray-800"
-            >
-              <svg 
-                className="w-4 h-4 sm:w-5 sm:h-5 text-white transform rotate-90" 
-                fill="none" 
-                stroke="currentColor" 
-                viewBox="0 0 24 24"
+            {/* Send or Stop button */}
+            {isLoading ? (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleAbortSession();
+                }}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleAbortSession();
+                }}
+                className="absolute right-2 top-1/2 transform -translate-y-1/2 h-9 sm:h-10 px-3 sm:px-4 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white rounded-xl sm:rounded-full flex items-center justify-center gap-1.5 transition-all shadow-md hover:shadow-lg active:scale-95 text-xs sm:text-sm font-medium z-10 cursor-pointer"
+                title={language === 'zh' ? '停止 (Stop)' : 'Stop'}
               >
-                <path 
-                  strokeLinecap="round" 
-                  strokeLinejoin="round" 
-                  strokeWidth={2} 
-                  d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" 
-                />
-              </svg>
-            </button>
+                <Square className="w-3.5 h-3.5 fill-current" />
+                <span className="font-medium">{language === 'zh' ? '停止' : 'Stop'}</span>
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={!input.trim()}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  handleSubmit(e);
+                }}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  handleSubmit(e);
+                }}
+                className="absolute right-2 top-1/2 transform -translate-y-1/2 w-10 h-10 sm:w-12 sm:h-12 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed rounded-full flex items-center justify-center transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:ring-offset-gray-800 shadow-sm"
+              >
+                <svg 
+                  className="w-4 h-4 sm:w-5 sm:h-5 text-white transform rotate-90" 
+                  fill="none" 
+                  stroke="currentColor" 
+                  viewBox="0 0 24 24"
+                >
+                  <path 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round" 
+                    strokeWidth={2} 
+                    d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" 
+                  />
+                </svg>
+              </button>
+            )}
           </div>
           {/* Hint text */}
           <div className="text-xs text-gray-500 dark:text-gray-400 text-center mt-2 hidden sm:block">
-            Press Enter to send • Shift+Enter for new line • Tab to change modes • @ to reference files
+            {language === 'zh' 
+              ? '按 Enter 发送 • Shift+Enter 换行 • Tab 切换模式 • @ 引用文件' 
+              : 'Press Enter to send • Shift+Enter for new line • Tab to change modes • @ to reference files'}
           </div>
           <div className={`text-xs text-gray-500 dark:text-gray-400 text-center mt-2 sm:hidden transition-opacity duration-200 ${
             isInputFocused ? 'opacity-100' : 'opacity-0'
           }`}>
-            Enter to send • Tab for modes • @ for files
+            {language === 'zh'
+              ? 'Enter 发送 • Tab 切换模式 • @ 引用文件'
+              : 'Enter to send • Tab for modes • @ for files'}
           </div>
         </form>
       </div>
