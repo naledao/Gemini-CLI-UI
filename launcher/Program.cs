@@ -31,8 +31,11 @@ internal sealed class MainForm : Form
     private readonly Button _browseButton = new();
     private readonly Button _nodeBrowseButton = new();
     private readonly Button _startButton = new();
+    private readonly Button _stopButton = new();
     private readonly TextBox _logBox = new();
     private Process? _serverProcess;
+    private bool _startInProgress;
+    private bool _stopInProgress;
 
     private static readonly string ConfigDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -107,6 +110,13 @@ internal sealed class MainForm : Form
         _startButton.Font = new Font(Font.FontFamily, 10F, FontStyle.Bold);
         _startButton.Click += StartButton_Click;
 
+        _stopButton.Text = "停止";
+        _stopButton.Location = new Point(204, 288);
+        _stopButton.Size = new Size(160, 42);
+        _stopButton.Font = new Font(Font.FontFamily, 10F, FontStyle.Bold);
+        _stopButton.Enabled = false;
+        _stopButton.Click += StopButton_Click;
+
         var logLabel = new Label
         {
             Text = "运行日志",
@@ -126,7 +136,7 @@ internal sealed class MainForm : Form
         Controls.AddRange([
             title, pathLabel, _projectPath, _browseButton,
             nodeLabel, _nodePath, _nodeBrowseButton,
-            proxyLabel, _proxyPort, _startButton, logLabel, _logBox
+            proxyLabel, _proxyPort, _startButton, _stopButton, logLabel, _logBox
         ]);
 
         Load += (_, _) => LoadConfig();
@@ -176,7 +186,8 @@ internal sealed class MainForm : Form
             return;
 
         SaveConfig(projectDir, proxyPort, nodePath);
-        _startButton.Enabled = false;
+        _startInProgress = true;
+        UpdateServerButtonStates();
         _browseButton.Enabled = false;
         _nodeBrowseButton.Enabled = false;
         _logBox.Clear();
@@ -199,9 +210,14 @@ internal sealed class MainForm : Form
                     : nodeDirectory + Path.PathSeparator + currentPath
             };
 
+            var visualStudioPath = TryConfigureVisualStudioBuildEnvironment(env, nodeDirectory);
+
             Log($"项目目录：{projectDir}");
             Log($"Node.js：{nodePath}");
             Log($"代理：{proxy}");
+            Log(visualStudioPath is null
+                ? "C++ 编译环境：未自动发现 Visual Studio 2022（仅在原生模块需要编译时才会影响启动）"
+                : $"C++ 编译环境：Visual Studio 2022 - {visualStudioPath}");
             Log(string.Empty);
 
             var dependencySnapshotBeforePull = CaptureDependencySnapshot(projectDir);
@@ -214,20 +230,27 @@ internal sealed class MainForm : Form
                 env);
 
             var dependencySnapshotAfterPull = CaptureDependencySnapshot(projectDir);
-            var nodeModulesExists = Directory.Exists(Path.Combine(projectDir, "node_modules"));
             var dependencyFilesChanged = dependencySnapshotBeforePull != dependencySnapshotAfterPull;
+            var dependencyIssue = GetDependencyIntegrityIssue(projectDir);
 
             Log("[2/4] 检查依赖...");
-            if (!nodeModulesExists || dependencyFilesChanged)
+            if (dependencyFilesChanged || dependencyIssue is not null)
             {
-                Log(!nodeModulesExists
-                    ? "node_modules 不存在，开始安装依赖..."
-                    : "package.json/package-lock.json 已变化，开始安装/更新依赖...");
+                Log(dependencyFilesChanged
+                    ? "package.json/package-lock.json 已变化，开始安装/更新依赖..."
+                    : $"依赖不完整（{dependencyIssue}），开始安装/修复依赖...");
                 await RunCommandAsync(npmPath, "install", projectDir, env);
+
+                dependencyIssue = GetDependencyIntegrityIssue(projectDir);
+                if (dependencyIssue is not null)
+                {
+                    throw new InvalidOperationException(
+                        $"npm install 已完成，但依赖仍不完整：{dependencyIssue}");
+                }
             }
             else
             {
-                Log("依赖清单未变化，跳过 npm install。");
+                Log("依赖完整且清单未变化，跳过 npm install。");
             }
 
             Log("[3/4] 构建项目...");
@@ -256,9 +279,57 @@ internal sealed class MainForm : Form
         }
         finally
         {
-            _startButton.Enabled = true;
+            _startInProgress = false;
+            UpdateServerButtonStates();
             _browseButton.Enabled = true;
             _nodeBrowseButton.Enabled = true;
+        }
+    }
+
+    private async void StopButton_Click(object? sender, EventArgs e)
+    {
+        var process = _serverProcess;
+        if (process is null || HasProcessExited(process))
+        {
+            Log("当前没有由本启动器管理的服务进程需要停止。");
+            if (ReferenceEquals(_serverProcess, process))
+            {
+                _serverProcess?.Dispose();
+                _serverProcess = null;
+            }
+            UpdateServerButtonStates();
+            return;
+        }
+
+        _stopInProgress = true;
+        UpdateServerButtonStates();
+
+        try
+        {
+            Log($"正在停止服务进程（PID {process.Id}）...");
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            Log("服务已停止。");
+        }
+        catch (InvalidOperationException)
+        {
+            Log("服务进程已经退出。");
+        }
+        catch (Exception ex)
+        {
+            Log($"停止服务失败：{ex.Message}");
+            MessageBox.Show(this, ex.Message, "停止失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            if (ReferenceEquals(_serverProcess, process))
+            {
+                process.Dispose();
+                _serverProcess = null;
+            }
+
+            _stopInProgress = false;
+            UpdateServerButtonStates();
         }
     }
 
@@ -389,6 +460,51 @@ internal sealed class MainForm : Form
             ComputeFileSha256(Path.Combine(projectDir, "package-lock.json")));
     }
 
+    private static string? GetDependencyIntegrityIssue(string projectDir)
+    {
+        var nodeModules = Path.Combine(projectDir, "node_modules");
+        if (!Directory.Exists(nodeModules))
+            return "node_modules 不存在";
+
+        if (!File.Exists(Path.Combine(nodeModules, ".bin", "vite.cmd")))
+            return "缺少 Vite（node_modules\\.bin\\vite.cmd）";
+
+        if (PackageDeclaresDependency(projectDir, "node-pty") &&
+            !File.Exists(Path.Combine(nodeModules, "node-pty", "package.json")))
+        {
+            return "缺少 node-pty";
+        }
+
+        return null;
+    }
+
+    private static bool PackageDeclaresDependency(string projectDir, string packageName)
+    {
+        var packageJsonPath = Path.Combine(projectDir, "package.json");
+        if (!File.Exists(packageJsonPath))
+            return false;
+
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(packageJsonPath));
+            foreach (var sectionName in new[] { "dependencies", "devDependencies", "optionalDependencies" })
+            {
+                if (document.RootElement.TryGetProperty(sectionName, out var section) &&
+                    section.ValueKind == JsonValueKind.Object &&
+                    section.TryGetProperty(packageName, out _))
+                {
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            // npm will surface malformed package.json when install/build runs.
+        }
+
+        return false;
+    }
+
     private static string ComputeFileSha256(string path)
     {
         if (!File.Exists(path))
@@ -410,19 +526,29 @@ internal sealed class MainForm : Form
         }
 
         _serverProcess?.Dispose();
-        _serverProcess = new Process
+        var serverProcess = new Process
         {
             StartInfo = CreateProcessStartInfo(npmPath, "run server", projectDir, environment),
             EnableRaisingEvents = true
         };
+        _serverProcess = serverProcess;
 
-        _serverProcess.OutputDataReceived += (_, e) => { if (e.Data is not null) Log("[server] " + e.Data); };
-        _serverProcess.ErrorDataReceived += (_, e) => { if (e.Data is not null) Log("[server] " + e.Data); };
-        _serverProcess.Exited += (_, _) => Log($"[server] 服务进程已退出，退出码：{_serverProcess?.ExitCode}");
+        serverProcess.OutputDataReceived += (_, e) => { if (e.Data is not null) Log("[server] " + e.Data); };
+        serverProcess.ErrorDataReceived += (_, e) => { if (e.Data is not null) Log("[server] " + e.Data); };
+        serverProcess.Exited += (_, _) =>
+        {
+            var exitCode = TryGetExitCode(serverProcess);
+            Log(exitCode is null
+                ? "[server] 服务进程已退出。"
+                : $"[server] 服务进程已退出，退出码：{exitCode}");
+
+            if (!IsDisposed && IsHandleCreated)
+                BeginInvoke(UpdateServerButtonStates);
+        };
 
         try
         {
-            if (!_serverProcess.Start())
+            if (!serverProcess.Start())
                 throw new InvalidOperationException("无法启动 npm run server。");
         }
         catch (System.ComponentModel.Win32Exception ex)
@@ -430,8 +556,46 @@ internal sealed class MainForm : Form
             throw new InvalidOperationException("无法启动 npm。请确认 Node.js/npm 已安装并加入 PATH。", ex);
         }
 
-        _serverProcess.BeginOutputReadLine();
-        _serverProcess.BeginErrorReadLine();
+        serverProcess.BeginOutputReadLine();
+        serverProcess.BeginErrorReadLine();
+        UpdateServerButtonStates();
+    }
+
+    private void UpdateServerButtonStates()
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(UpdateServerButtonStates);
+            return;
+        }
+
+        var running = _serverProcess is not null && !HasProcessExited(_serverProcess);
+        _startButton.Enabled = !_startInProgress && !_stopInProgress && !running;
+        _stopButton.Enabled = !_startInProgress && !_stopInProgress && running;
+    }
+
+    private static bool HasProcessExited(Process process)
+    {
+        try
+        {
+            return process.HasExited;
+        }
+        catch (InvalidOperationException)
+        {
+            return true;
+        }
+    }
+
+    private static int? TryGetExitCode(Process process)
+    {
+        try
+        {
+            return process.ExitCode;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static ProcessStartInfo CreateProcessStartInfo(
@@ -455,6 +619,135 @@ internal sealed class MainForm : Form
             psi.Environment[pair.Key] = pair.Value;
 
         return psi;
+    }
+
+    private static string? TryConfigureVisualStudioBuildEnvironment(
+        Dictionary<string, string> environment,
+        string nodeDirectory)
+    {
+        // node-gyp 10 may fail to discover Visual Studio when it cannot invoke
+        // PowerShell successfully. Importing vcvars64.bat makes the compiler,
+        // SDK and VS installation explicit for all npm child processes.
+        environment["npm_config_msvs_version"] = "2022";
+        environment["GYP_MSVS_VERSION"] = "2022";
+
+        var installationPath = FindVisualStudio2022WithCppTools();
+        if (installationPath is null)
+            return null;
+
+        var vcvarsPath = Path.Combine(installationPath, "VC", "Auxiliary", "Build", "vcvars64.bat");
+        if (!File.Exists(vcvarsPath))
+            return null;
+
+        try
+        {
+            var psi = new ProcessStartInfo(
+                Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe",
+                $"/d /s /c \"\"{vcvarsPath}\" >nul && set\"")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+
+            foreach (var pair in environment)
+                psi.Environment[pair.Key] = pair.Value;
+
+            using var process = Process.Start(psi);
+            if (process is null)
+                return null;
+
+            var output = process.StandardOutput.ReadToEnd();
+            process.WaitForExit();
+            if (process.ExitCode != 0)
+                return null;
+
+            foreach (var rawLine in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                var equalsIndex = rawLine.IndexOf('=');
+                if (equalsIndex <= 0)
+                    continue;
+
+                var key = rawLine[..equalsIndex];
+                var value = rawLine[(equalsIndex + 1)..];
+                environment[key] = value;
+            }
+
+            // vcvars64.bat inherits PATH from the launcher process. Re-prepend the
+            // user-selected Node directory so npm/native build scripts always use
+            // the same node.exe selected in the UI.
+            var developerPath = environment.TryGetValue("PATH", out var importedPath)
+                ? importedPath
+                : string.Empty;
+            environment["PATH"] = string.IsNullOrWhiteSpace(developerPath)
+                ? nodeDirectory
+                : nodeDirectory + Path.PathSeparator + developerPath;
+            environment["npm_config_msvs_version"] = "2022";
+            environment["GYP_MSVS_VERSION"] = "2022";
+
+            return installationPath;
+        }
+        catch
+        {
+            // npm can still proceed; if a native package needs compilation,
+            // RunCommandAsync will surface node-gyp's detailed failure.
+            return null;
+        }
+    }
+
+    private static string? FindVisualStudio2022WithCppTools()
+    {
+        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        var vswherePath = Path.Combine(
+            programFilesX86,
+            "Microsoft Visual Studio",
+            "Installer",
+            "vswhere.exe");
+
+        if (File.Exists(vswherePath))
+        {
+            try
+            {
+                var psi = new ProcessStartInfo(
+                    vswherePath,
+                    "-latest -products * -version [17.0,18.0) -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath")
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                    StandardOutputEncoding = Encoding.UTF8,
+                    StandardErrorEncoding = Encoding.UTF8
+                };
+
+                using var process = Process.Start(psi);
+                if (process is not null)
+                {
+                    var output = process.StandardOutput.ReadToEnd().Trim();
+                    process.WaitForExit();
+                    if (process.ExitCode == 0 && Directory.Exists(output))
+                        return output;
+                }
+            }
+            catch
+            {
+                // Fall through to conventional VS 2022 locations below.
+            }
+        }
+
+        var candidates = new[]
+        {
+            Path.Combine(programFilesX86, "Microsoft Visual Studio", "2022", "BuildTools"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Microsoft Visual Studio", "2022", "Community"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Microsoft Visual Studio", "2022", "Professional"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Microsoft Visual Studio", "2022", "Enterprise")
+        };
+
+        return candidates.FirstOrDefault(path =>
+            File.Exists(Path.Combine(path, "VC", "Auxiliary", "Build", "vcvars64.bat")));
     }
 
     private static int ReadProjectPort(string projectDir)

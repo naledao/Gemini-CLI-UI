@@ -445,9 +445,11 @@ function Sidebar({
   const selectProjectFolder = async () => {
     if (selectingProjectFolder) return;
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120000);
     setSelectingProjectFolder(true);
     try {
-      const response = await api.selectFolder(newProjectPath.trim());
+      const response = await api.selectFolder(newProjectPath.trim(), controller.signal);
       const result = await response.json().catch(() => ({}));
 
       if (!response.ok) {
@@ -461,10 +463,16 @@ function Sidebar({
       }
     } catch (error) {
       console.error('Error selecting project folder:', error);
-      alert(error.message || (language === 'zh'
-        ? '无法打开 Windows 文件夹选择器'
-        : 'Could not open the Windows folder picker'));
+      const message = error?.name === 'AbortError'
+        ? (language === 'zh'
+          ? 'Windows 文件夹选择器等待超时，请重试'
+          : 'The Windows folder picker timed out. Please try again.')
+        : (error.message || (language === 'zh'
+          ? '无法打开 Windows 文件夹选择器'
+          : 'Could not open the Windows folder picker'));
+      alert(message);
     } finally {
+      clearTimeout(timeout);
       setSelectingProjectFolder(false);
     }
   };

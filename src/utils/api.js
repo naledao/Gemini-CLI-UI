@@ -63,10 +63,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path }),
     }),
-  selectFolder: (initialPath = '') =>
+  selectFolder: (initialPath = '', signal) =>
     authenticatedFetch('/api/system/select-folder', {
       method: 'POST',
       body: JSON.stringify({ initialPath }),
+      signal,
     }),
   getGeminiBinarySettings: () =>
     authenticatedFetch('/api/settings/gemini-binary'),

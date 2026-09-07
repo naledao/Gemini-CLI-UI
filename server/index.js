@@ -55,6 +55,7 @@ import { validateApiKey, authenticateToken, authenticateWebSocket } from './midd
 // File system watcher for projects folder
 let projectsWatcher = null;
 const connectedClients = new Set();
+let activeFolderPicker = null;
 
 // Setup file system watcher for Gemini projects folder using chokidar
 async function setupProjectsWatcher() {
@@ -457,16 +458,38 @@ app.post('/api/system/select-folder', authenticateToken, (req, res) => {
     return res.status(403).json({ error: 'Native folder selection is only available from this computer' });
   }
 
+  if (activeFolderPicker && activeFolderPicker.exitCode === null && !activeFolderPicker.killed) {
+    return res.status(409).json({ error: 'A Windows folder picker is already open' });
+  }
+
   const initialPath = typeof req.body?.initialPath === 'string' ? req.body.initialPath.trim() : '';
   const powerShellScript = [
     'Add-Type -AssemblyName System.Windows.Forms',
+    '[System.Windows.Forms.Application]::EnableVisualStyles()',
+    '$owner = New-Object System.Windows.Forms.Form',
+    '$dialog = $null',
+    'try {',
+    '$owner.ShowInTaskbar = $false',
+    '$owner.TopMost = $true',
+    '$owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None',
+    '$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen',
+    '$owner.Width = 1',
+    '$owner.Height = 1',
+    '$owner.Opacity = 0',
+    '$owner.Show()',
+    '$null = $owner.Activate()',
+    '$owner.BringToFront()',
+    '[System.Windows.Forms.Application]::DoEvents()',
     '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
     "$dialog.Description = 'Select project folder'",
     '$dialog.ShowNewFolderButton = $true',
     "if ($env:GEMINI_CLI_UI_INITIAL_FOLDER -and (Test-Path -LiteralPath $env:GEMINI_CLI_UI_INITIAL_FOLDER -PathType Container)) { $dialog.SelectedPath = $env:GEMINI_CLI_UI_INITIAL_FOLDER }",
-    '$result = $dialog.ShowDialog()',
+    '$result = $dialog.ShowDialog($owner)',
     'if ($result -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.SelectedPath) }',
-    '$dialog.Dispose()'
+    '} finally {',
+    'if ($null -ne $dialog) { $dialog.Dispose() }',
+    'if ($null -ne $owner) { $owner.Close(); $owner.Dispose() }',
+    '}'
   ].join('; ');
 
   const picker = spawn(
@@ -481,9 +504,44 @@ app.post('/api/system/select-folder', authenticateToken, (req, res) => {
     }
   );
 
+  activeFolderPicker = picker;
+
   let stdout = '';
   let stderr = '';
   let responded = false;
+  let clientDisconnected = false;
+
+  const clearPickerTimeout = () => clearTimeout(pickerTimeout);
+  const releaseActivePicker = () => {
+    if (activeFolderPicker === picker) {
+      activeFolderPicker = null;
+    }
+  };
+
+  const terminatePicker = () => {
+    if (picker.exitCode === null && !picker.killed) {
+      try { picker.kill(); } catch {}
+    }
+  };
+
+  const pickerTimeout = setTimeout(() => {
+    if (responded || clientDisconnected) return;
+    responded = true;
+    terminatePicker();
+    if (!res.headersSent && !res.writableEnded) {
+      res.status(504).json({ error: 'Windows folder picker timed out after 2 minutes' });
+    }
+  }, 120000);
+
+  const handleClientDisconnect = () => {
+    if (responded || res.writableEnded) return;
+    clientDisconnected = true;
+    clearPickerTimeout();
+    terminatePicker();
+  };
+
+  req.on('aborted', handleClientDisconnect);
+  res.on('close', handleClientDisconnect);
 
   picker.stdout.on('data', (data) => {
     stdout += data.toString();
@@ -493,14 +551,21 @@ app.post('/api/system/select-folder', authenticateToken, (req, res) => {
   });
 
   picker.on('error', (error) => {
+    clearPickerTimeout();
+    releaseActivePicker();
     if (responded) return;
     responded = true;
     console.error('Failed to start Windows folder picker:', error);
-    res.status(500).json({ error: 'Failed to open the Windows folder picker' });
+    if (!clientDisconnected && !res.headersSent && !res.writableEnded) {
+      res.status(500).json({ error: 'Failed to open the Windows folder picker' });
+    }
   });
 
   picker.on('close', (code) => {
+    clearPickerTimeout();
+    releaseActivePicker();
     if (responded) return;
+    if (clientDisconnected) return;
     responded = true;
 
     if (code !== 0) {
@@ -1371,6 +1436,12 @@ app.post(['/api/projects/:projectName/upload-attachments', '/api/projects/:proje
   } catch (error) {
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
+});
+
+// Missing Vite assets must be a real 404. Returning index.html for a missing
+// JavaScript module gives it a text/html MIME type and leaves the React UI blank.
+app.get('/assets/*', (req, res) => {
+  res.status(404).type('text/plain').send('Asset not found');
 });
 
 // Serve React app for all other routes
