@@ -39,6 +39,7 @@ function Sidebar({
   projects, 
   selectedProject, 
   selectedSession, 
+  activeSessions,
   onProjectSelect, 
   onSessionSelect, 
   onNewSession,
@@ -74,6 +75,22 @@ function Sidebar({
   const [searchFilter, setSearchFilter] = useState('');
   const [fsDirectories, setFsDirectories] = useState([]);
   const [fsLoading, setFsLoading] = useState(false);
+
+  // Real Gemini runtime state comes from App. Keys are scoped as either
+  // "project::sessionId" or "project::run:runId". lastActivity only
+  // describes recency and must not be used as a running indicator.
+  const activeSessionKeys = activeSessions instanceof Set
+    ? activeSessions
+    : new Set(activeSessions || []);
+
+  const getProjectRunningCount = (projectName) => {
+    const prefix = `${projectName}::`;
+    let count = 0;
+    for (const key of activeSessionKeys) {
+      if (key.startsWith(prefix)) count += 1;
+    }
+    return count;
+  };
 
   // Filesystem suggestions when searching with a path like /root or ~
   useEffect(() => {
@@ -810,6 +827,7 @@ function Sidebar({
               const isExpanded = expandedProjects.has(project.name);
               const isSelected = selectedProject?.name === project.name;
               const isStarred = isProjectStarred(project.name);
+              const projectRunningCount = getProjectRunningCount(project.name);
               
               return (
                 <div key={project.name} className="md:space-y-1">
@@ -867,14 +885,22 @@ function Sidebar({
                                   <h3 className="text-sm font-medium text-foreground truncate">
                                     {project.displayName}
                                   </h3>
-                                  <p className="text-xs text-muted-foreground">
-                                    {(() => {
-                                      const sessionCount = getAllSessions(project).length;
-                                      const hasMore = project.sessionMeta?.hasMore !== false;
-                                      const count = hasMore && sessionCount >= 5 ? `${sessionCount}+` : sessionCount;
-                                      return t('sidebar.sessionCount', { count });
-                                    })()}
-                                  </p>
+                                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                    <span>
+                                      {(() => {
+                                        const sessionCount = getAllSessions(project).length;
+                                        const hasMore = project.sessionMeta?.hasMore !== false;
+                                        const count = hasMore && sessionCount >= 5 ? `${sessionCount}+` : sessionCount;
+                                        return t('sidebar.sessionCount', { count });
+                                      })()}
+                                    </span>
+                                    {projectRunningCount > 0 && (
+                                      <span className="inline-flex items-center gap-1 font-semibold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                        {language === 'zh' ? `${projectRunningCount} 运行中` : `${projectRunningCount} running`}
+                                      </span>
+                                    )}
+                                  </div>
                                 </>
                               )}
                             </div>
@@ -1013,12 +1039,20 @@ function Sidebar({
                               <div className="text-sm font-semibold truncate text-foreground" title={project.displayName}>
                                 {project.displayName}
                               </div>
-                              <div className="text-xs text-muted-foreground">
-                                {(() => {
-                                  const sessionCount = getAllSessions(project).length;
-                                  const hasMore = project.sessionMeta?.hasMore !== false;
-                                  return hasMore && sessionCount >= 5 ? `${sessionCount}+` : sessionCount;
-                                })()}
+                              <div className="text-xs text-muted-foreground flex items-center gap-1.5 min-w-0">
+                                <span>
+                                  {(() => {
+                                    const sessionCount = getAllSessions(project).length;
+                                    const hasMore = project.sessionMeta?.hasMore !== false;
+                                    return hasMore && sessionCount >= 5 ? `${sessionCount}+` : sessionCount;
+                                  })()}
+                                </span>
+                                {projectRunningCount > 0 && (
+                                  <span className="inline-flex items-center gap-1 font-semibold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                    {language === 'zh' ? `${projectRunningCount} 运行中` : `${projectRunningCount} running`}
+                                  </span>
+                                )}
                                 {project.fullPath !== project.displayName && (
                                   <span className="ml-1 opacity-60" title={project.fullPath}>
                                     • {project.fullPath.length > 25 ? '...' + project.fullPath.slice(-22) : project.fullPath}
@@ -1130,17 +1164,14 @@ function Sidebar({
                         </div>
                       ) : (
                         getAllSessions(project).map((session) => {
-                          // Calculate if session is active (within last 10 minutes)
-                          const sessionDate = new Date(session.lastActivity);
-                          const diffInMinutes = Math.floor((currentTime - sessionDate) / (1000 * 60));
-                          const isActive = diffInMinutes < 10;
+                          const isRunning = activeSessionKeys.has(`${project.name}::${session.id}`);
                           
                           return (
                           <div key={session.id} className="group relative">
-                            {/* Active session indicator dot */}
-                            {isActive && (
+                            {/* Actual running-session indicator */}
+                            {isRunning && (
                               <div className="absolute left-0 top-1/2 transform -translate-y-1/2 -translate-x-1">
-                                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                                <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
                               </div>
                             )}
                             {/* Mobile Session Item */}
@@ -1149,7 +1180,7 @@ function Sidebar({
                                 className={cn(
                                   "p-2 mx-3 my-0.5 rounded-md bg-card border active:scale-[0.98] transition-all duration-150 relative",
                                   selectedSession?.id === session.id ? "bg-primary/5 border-primary/20" :
-                                  isActive ? "border-green-500/30 bg-green-50/5 dark:bg-green-900/5" : "border-border/30"
+                                  isRunning ? "border-emerald-500/40 bg-emerald-50/40 dark:bg-emerald-900/10" : "border-border/30"
                                 )}
                                 onClick={() => {
                                   onProjectSelect(project);
@@ -1179,6 +1210,12 @@ function Sidebar({
                                       <span className="text-xs text-muted-foreground">
                                         {formatTimeAgo(session.lastActivity, currentTime, t, language)}
                                       </span>
+                                      {isRunning && (
+                                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
+                                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                          {language === 'zh' ? '运行中' : 'Running'}
+                                        </span>
+                                      )}
                                       {session.messageCount > 0 && (
                                         <Badge variant="secondary" className="text-xs px-1 py-0 ml-auto">
                                           {session.messageCount}
@@ -1207,7 +1244,8 @@ function Sidebar({
                                 variant="ghost"
                                 className={cn(
                                   "w-full justify-start p-2 h-auto font-normal text-left hover:bg-accent/50 transition-colors duration-200",
-                                  selectedSession?.id === session.id && "bg-accent text-accent-foreground"
+                                  selectedSession?.id === session.id && "bg-accent text-accent-foreground",
+                                  isRunning && selectedSession?.id !== session.id && "bg-emerald-50/50 dark:bg-emerald-900/10 ring-1 ring-inset ring-emerald-500/20"
                                 )}
                                 onClick={() => onSessionSelect(session)}
                                 onTouchEnd={handleTouchClick(() => onSessionSelect(session))}
@@ -1223,6 +1261,12 @@ function Sidebar({
                                       <span className="text-xs text-muted-foreground">
                                         {formatTimeAgo(session.lastActivity, currentTime, t, language)}
                                       </span>
+                                      {isRunning && (
+                                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
+                                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                          {language === 'zh' ? '运行中' : 'Running'}
+                                        </span>
+                                      )}
                                       {session.messageCount > 0 && (
                                         <Badge variant="secondary" className="text-xs px-1 py-0 ml-auto">
                                           {session.messageCount}

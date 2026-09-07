@@ -818,7 +818,7 @@ function handleChatConnection(ws) {
         console.log('🛑 Abort session request:', data.sessionId, 'run:', data.runId);
         const success = abortGeminiSession(data.sessionId, data.runId);
         ws.send(JSON.stringify({
-          type: 'session-aborted',
+          type: success ? 'session-aborted' : 'session-abort-failed',
           sessionId: data.sessionId,
           runId: data.runId || null,
           projectName: data.projectName || null,

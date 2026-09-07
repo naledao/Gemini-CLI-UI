@@ -574,6 +574,7 @@ function AppContent() {
               latestVersion={latestVersion}
               currentVersion={currentVersion}
               onShowVersionModal={() => setShowVersionModal(true)}
+              activeSessions={activeSessions}
               onToggleCollapse={handleToggleSidebar}
               isCollapsed={!desktopSidebarOpen}
             />
@@ -621,6 +622,7 @@ function AppContent() {
               latestVersion={latestVersion}
               currentVersion={currentVersion}
               onShowVersionModal={() => setShowVersionModal(true)}
+              activeSessions={activeSessions}
               onCloseMobile={() => setSidebarOpen(false)}
             />
           </div>
@@ -632,6 +634,7 @@ function AppContent() {
         <MainContent
           selectedProject={selectedProject}
           selectedSession={selectedSession}
+          activeSessions={activeSessions}
           ws={ws}
           sendMessage={sendMessage}
           messages={messages}

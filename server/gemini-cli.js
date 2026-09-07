@@ -183,7 +183,11 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
     const geminiProcess = spawn(geminiPath, args, {
       cwd: workingDir,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env } // Inherit all environment variables
+      env: { ...process.env }, // Inherit all environment variables
+      // On POSIX make Gemini the leader of its own process group. Gemini CLI
+      // starts a second Node process internally; without a dedicated group,
+      // killing only the wrapper leaves that child orphaned and still working.
+      detached: process.platform !== 'win32'
     });
     
     // Prefer the client-generated run ID. Session IDs can be unavailable until
@@ -337,9 +341,10 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
     });
     
     // Handle process completion
-    geminiProcess.on('close', async (code) => {
-      console.log(`Gemini CLI process exited with code ${code}`);
+    geminiProcess.on('close', async (code, signal) => {
+      console.log(`Gemini CLI process exited with code ${code}${signal ? ` signal ${signal}` : ''}`);
       clearTimeout(timeout);
+      const wasAborted = geminiProcess.abortRequested === true;
       
       // Flush any remaining content in lineBuffer
       if (lineBuffer && lineBuffer.trim()) {
@@ -375,22 +380,30 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
       }
       
       // If process failed with non-zero code and produced no output, notify client of error
-      if (code !== 0 && !hasReceivedOutput && !fullResponse) {
+      if (!wasAborted && code !== 0 && !hasReceivedOutput && !fullResponse) {
         ws.send(JSON.stringify({
           type: 'gemini-error',
           error: stderrBuffer.trim() || `Gemini CLI process exited with code ${code}`
         }));
       }
-      
-      ws.send(JSON.stringify({
-        type: 'gemini-complete',
-        exitCode: code,
-        isNewSession: !sessionId && !!command // Flag to indicate this was a new session
-      }));
-      
-      if (code === 0) {
+
+      // abort-session already emitted a scoped session-aborted event. Do not
+      // follow it with gemini-complete/gemini-error for the same cancelled run.
+      if (wasAborted) {
+        resolve();
+      } else if (code === 0) {
+        ws.send(JSON.stringify({
+          type: 'gemini-complete',
+          exitCode: code,
+          isNewSession: !sessionId && !!command // Flag to indicate this was a new session
+        }));
         resolve();
       } else {
+        ws.send(JSON.stringify({
+          type: 'gemini-complete',
+          exitCode: code,
+          isNewSession: !sessionId && !!command
+        }));
         reject(new Error(`Gemini CLI exited with code ${code}`));
       }
     });
@@ -424,6 +437,31 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
       // Keep stdin open for interactive use
     }
   });
+}
+
+function signalGeminiProcessTree(geminiProcess, signal) {
+  if (!geminiProcess?.pid) return false;
+
+  // POSIX: because spawnGemini uses detached:true, -pid addresses the whole
+  // Gemini process group (wrapper plus every descendant it started).
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(-geminiProcess.pid, signal);
+      return true;
+    } catch (error) {
+      if (error?.code !== 'ESRCH') {
+        console.warn(`Failed to signal Gemini process group ${geminiProcess.pid}:`, error.message);
+      }
+    }
+  }
+
+  // Fallback for legacy/non-POSIX processes.
+  try {
+    return geminiProcess.kill(signal);
+  } catch (error) {
+    console.warn(`Failed to signal Gemini PID ${geminiProcess.pid}:`, error.message);
+    return false;
+  }
 }
 
 function abortGeminiSession(sessionId, runId = null) {
@@ -463,25 +501,21 @@ function abortGeminiSession(sessionId, runId = null) {
   if (processToKill) {
     console.log(`🛑 Terminating Gemini process PID: ${processToKill.pid} (key: ${processKey})`);
     try {
-      // Kill process
-      processToKill.kill('SIGTERM');
-      
-      // Also try to kill the entire process group if available
-      try {
-        if (processToKill.pid) {
-          process.kill(-processToKill.pid, 'SIGTERM');
-        }
-      } catch (e) {}
+      processToKill.abortRequested = true;
+      const signaled = signalGeminiProcessTree(processToKill, 'SIGTERM');
+      if (!signaled) {
+        processToKill.abortRequested = false;
+        return false;
+      }
 
       // Force kill fallback after 1.5s
       setTimeout(() => {
-        try {
-          processToKill.kill('SIGKILL');
-          if (processToKill.pid) process.kill(-processToKill.pid, 'SIGKILL');
-        } catch (e) {}
+        signalGeminiProcessTree(processToKill, 'SIGKILL');
       }, 1500);
 
-      activeGeminiProcesses.delete(processKey);
+      // Keep the process registered until its close/error handler runs. This
+      // prevents a second click from seeing an empty map while descendants are
+      // still shutting down and lets normal cleanup remove the exact run key.
       return true;
     } catch (error) {
       console.error('Error killing process:', error);

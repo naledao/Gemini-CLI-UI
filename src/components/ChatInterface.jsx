@@ -53,7 +53,8 @@ const GEMINI_RUNTIME_MESSAGE_TYPES = new Set([
   'gemini-complete',
   'gemini-status',
   'gemini-stats',
-  'session-aborted'
+  'session-aborted',
+  'session-abort-failed'
 ]);
 
 const normalizeProjectPath = (value = '') => String(value || '').replace(/\\/g, '/').replace(/\/$/, '');
@@ -1313,8 +1314,26 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           setCurrentRunId(null);
 
           setChatMessages(prev => [...prev, {
-            type: 'assistant',
-            content: 'Session interrupted by user.',
+            type: 'system',
+            content: language === 'zh' ? '⏹️ 已手动停止任务' : '⏹️ Task stopped manually',
+            timestamp: new Date()
+          }]);
+          break;
+
+          case 'session-abort-failed':
+          // Backend could not find/signal the requested run. Keep the UI in a
+          // running state instead of falsely claiming the task was stopped.
+          setIsLoading(true);
+          setCanAbortSession(true);
+          setGeminiStatus({
+            text: language === 'zh' ? '停止失败，任务仍在运行' : 'Stop failed; task is still running',
+            can_interrupt: true
+          });
+          setChatMessages(prev => [...prev, {
+            type: 'error',
+            content: language === 'zh'
+              ? '停止失败：后端没有找到对应的运行进程，请重试。'
+              : 'Stop failed: the backend could not find the matching running process. Please try again.',
             timestamp: new Date()
           }]);
           break;
@@ -1885,28 +1904,31 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   };
   
   const handleAbortSession = () => {
-    console.log('🛑 Aborting session requested by user, sessionId:', currentSessionId);
-    
-    // 1. Immediately reset UI loading state
-    setIsLoading(false);
-    setCanAbortSession(false);
-    setGeminiStatus(null);
-    
-    // 2. Add immediate feedback in chat stream
-    setChatMessages(prev => [...prev, {
-      type: 'system',
-      content: language === 'zh' ? '⏹️ 已手动停止任务' : '⏹️ Task stopped manually',
-      timestamp: new Date()
-    }]);
+    console.log('🛑 Aborting session requested by user, sessionId:', currentSessionId, 'runId:', currentRunId);
 
-    // 3. Send abort event to backend
-    sendMessage({
+    // Wait for backend confirmation. Previously the UI immediately claimed
+    // success even when only Gemini's wrapper process had died.
+    setCanAbortSession(false);
+    setGeminiStatus({
+      text: language === 'zh' ? '正在停止' : 'Stopping',
+      can_interrupt: false
+    });
+
+    const sent = sendMessage({
       type: 'abort-session',
       sessionId: currentSessionId || selectedSession?.id,
       runId: currentRunId,
       projectName: selectedProject?.name,
       projectPath: selectedProject?.path
     });
+
+    if (sent === false) {
+      setCanAbortSession(true);
+      setGeminiStatus({
+        text: language === 'zh' ? '停止失败，连接不可用' : 'Stop failed; connection unavailable',
+        can_interrupt: true
+      });
+    }
   };
 
   const handleModeSwitch = () => {

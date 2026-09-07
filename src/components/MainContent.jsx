@@ -8,6 +8,7 @@ import ProjectContextPanel from './ProjectContextPanel';
 function MainContent({ 
   selectedProject, 
   selectedSession, 
+  activeSessions,
   ws, 
   sendMessage, 
   messages,
@@ -32,6 +33,23 @@ function MainContent({
     const saved = localStorage.getItem('rightPanelOpen');
     return saved !== null ? JSON.parse(saved) : false;
   });
+
+  const activeSessionKeys = activeSessions instanceof Set
+    ? activeSessions
+    : new Set(activeSessions || []);
+  const projectPrefix = selectedProject ? `${selectedProject.name}::` : '';
+  const projectRunningCount = selectedProject
+    ? Array.from(activeSessionKeys).filter(key => key.startsWith(projectPrefix)).length
+    : 0;
+  const selectedSessionIsRunning = !!(
+    selectedProject && selectedSession &&
+    activeSessionKeys.has(`${selectedProject.name}::${selectedSession.id}`)
+  );
+  const newSessionIsRunning = !!(
+    selectedProject && !selectedSession &&
+    Array.from(activeSessionKeys).some(key => key.startsWith(`${selectedProject.name}::run:`))
+  );
+  const currentViewIsRunning = selectedSessionIsRunning || newSessionIsRunning;
 
   const toggleRightPanel = () => {
     setIsRightPanelOpen(prev => {
@@ -157,18 +175,44 @@ function MainContent({
             <div className="min-w-0 flex-1">
               {selectedSession ? (
                 <div>
-                  <h2 className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white truncate">
-                    {selectedSession.summary}
-                  </h2>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <h2 className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white truncate min-w-0">
+                      {selectedSession.summary}
+                    </h2>
+                    {currentViewIsRunning ? (
+                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-900/20 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 whitespace-nowrap flex-shrink-0">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                        {language === 'zh' ? '运行中' : 'Running'}
+                      </span>
+                    ) : projectRunningCount > 0 ? (
+                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-900/20 text-[11px] font-semibold text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 whitespace-nowrap flex-shrink-0">
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                        {language === 'zh' ? `后台运行 ${projectRunningCount}` : `${projectRunningCount} background`}
+                      </span>
+                    ) : null}
+                  </div>
                   <div className="text-xs text-gray-500 dark:text-gray-400 truncate">
                     {selectedProject.displayName} <span className="hidden sm:inline">• {selectedSession.id}</span>
                   </div>
                 </div>
               ) : (
                 <div>
-                  <h2 className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white">
-                    {t('sidebar.newSession')}
-                  </h2>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <h2 className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white">
+                      {t('sidebar.newSession')}
+                    </h2>
+                    {currentViewIsRunning ? (
+                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-900/20 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 whitespace-nowrap flex-shrink-0">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                        {language === 'zh' ? '运行中' : 'Running'}
+                      </span>
+                    ) : projectRunningCount > 0 ? (
+                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-900/20 text-[11px] font-semibold text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 whitespace-nowrap flex-shrink-0">
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                        {language === 'zh' ? `后台运行 ${projectRunningCount}` : `${projectRunningCount} background`}
+                      </span>
+                    ) : null}
+                  </div>
                   <div className="text-xs text-gray-500 dark:text-gray-400 truncate">
                     {selectedProject.displayName}
                   </div>
