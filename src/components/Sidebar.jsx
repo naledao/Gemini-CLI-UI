@@ -63,6 +63,7 @@ function Sidebar({
   const [editingName, setEditingName] = useState('');
   const [newProjectPath, setNewProjectPath] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
+  const [selectingProjectFolder, setSelectingProjectFolder] = useState(false);
   const [loadingSessions, setLoadingSessions] = useState({});
   const [additionalSessions, setAdditionalSessions] = useState({});
   const [initialSessionsLoaded, setInitialSessionsLoaded] = useState(new Set());
@@ -438,6 +439,36 @@ function Sidebar({
     setNewProjectPath('');
   };
 
+  const isWindowsClient = typeof navigator !== 'undefined' &&
+    /Win/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || '');
+
+  const selectProjectFolder = async () => {
+    if (selectingProjectFolder) return;
+
+    setSelectingProjectFolder(true);
+    try {
+      const response = await api.selectFolder(newProjectPath.trim());
+      const result = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(result.error || (language === 'zh'
+          ? '无法打开 Windows 文件夹选择器'
+          : 'Could not open the Windows folder picker'));
+      }
+
+      if (!result.cancelled && result.path) {
+        setNewProjectPath(result.path);
+      }
+    } catch (error) {
+      console.error('Error selecting project folder:', error);
+      alert(error.message || (language === 'zh'
+        ? '无法打开 Windows 文件夹选择器'
+        : 'Could not open the Windows folder picker'));
+    } finally {
+      setSelectingProjectFolder(false);
+    }
+  };
+
   const loadMoreSessions = async (project) => {
     // Check if we can load more sessions
     const canLoadMore = project.sessionMeta?.hasMore !== false;
@@ -600,17 +631,39 @@ function Sidebar({
               {t('sidebar.newProject')}
             </div>
             <div className="space-y-2">
-              <DirectoryAutocomplete
-                value={newProjectPath}
-                onChange={setNewProjectPath}
-                placeholder={t('sidebar.projectPathPlaceholder')}
-                className="w-full px-3 py-1.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/20"
-                autoFocus
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') createNewProject();
-                  if (e.key === 'Escape') cancelNewProject();
-                }}
-              />
+              <div className="flex items-start gap-2">
+                <div className="min-w-0 flex-1">
+                  <DirectoryAutocomplete
+                    value={newProjectPath}
+                    onChange={setNewProjectPath}
+                    placeholder={t('sidebar.projectPathPlaceholder')}
+                    className="w-full px-3 py-1.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/20"
+                    autoFocus
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') createNewProject();
+                      if (e.key === 'Escape') cancelNewProject();
+                    }}
+                  />
+                </div>
+                {isWindowsClient && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 w-8 px-0 flex-shrink-0"
+                    onClick={selectProjectFolder}
+                    disabled={creatingProject || selectingProjectFolder}
+                    title={language === 'zh' ? '选择项目文件夹' : 'Select project folder'}
+                    aria-label={language === 'zh' ? '选择项目文件夹' : 'Select project folder'}
+                  >
+                    {selectingProjectFolder ? (
+                      <div className="w-4 h-4 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
+                    ) : (
+                      <FolderOpen className="w-4 h-4" />
+                    )}
+                  </Button>
+                )}
+              </div>
               {newProjectPath.trim() && (
                 <div className="text-xs text-muted-foreground italic">
                   💡 {language === 'zh' ? '如果目录不存在将自动创建' : "Folder will be created if it doesn't exist"}
@@ -624,7 +677,7 @@ function Sidebar({
                 disabled={!newProjectPath.trim() || creatingProject}
                 className="flex-1 h-8 text-xs hover:bg-primary/90 transition-colors"
               >
-                {creatingProject ? t('sidebar.creating') : t('sidebar.createProject')}
+                {creatingProject ? t('common.creating') : t('common.create')}
               </Button>
               <Button
                 size="sm"
@@ -693,7 +746,7 @@ function Sidebar({
                     disabled={!newProjectPath.trim() || creatingProject}
                     className="flex-1 h-9 text-sm rounded-md bg-primary hover:bg-primary/90 active:scale-95 transition-all"
                   >
-                    {creatingProject ? t('sidebar.creating') : t('sidebar.create')}
+                    {creatingProject ? t('common.creating') : t('common.create')}
                   </Button>
                 </div>
               </div>

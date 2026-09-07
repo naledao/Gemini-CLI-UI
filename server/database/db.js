@@ -103,8 +103,23 @@ const userDb = {
   }
 };
 
+const settingsDb = {
+  get: (key) => {
+    const row = db.prepare('SELECT value FROM geminicliui_settings WHERE key = ?').get(key);
+    return row?.value ?? null;
+  },
+
+  set: (key, value) => {
+    db.prepare('INSERT INTO geminicliui_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP').run(key, value);
+    return value;
+  },
+
+  delete: (key) => db.prepare('DELETE FROM geminicliui_settings WHERE key = ?').run(key).changes > 0
+};
+
 export {
   db,
   initializeDatabase,
-  userDb
+  userDb,
+  settingsDb
 };

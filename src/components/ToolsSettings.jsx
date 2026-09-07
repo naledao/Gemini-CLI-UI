@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Button } from './ui/button';
-import { X, Settings, Moon, Sun, Volume2, Globe, ArrowUpDown } from 'lucide-react';
+import { X, Settings, Moon, Sun, Volume2, Globe, ArrowUpDown, Terminal, FolderOpen, RotateCcw, CheckCircle2, AlertCircle } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import { useLanguage } from '../contexts/LanguageContext';
+import { api } from '../utils/api';
 
 function ToolsSettings({ isOpen, onClose }) {
   const { isDarkMode, toggleDarkMode } = useTheme();
@@ -11,9 +12,21 @@ function ToolsSettings({ isOpen, onClose }) {
   const [projectSortOrder, setProjectSortOrder] = useState('name');
   const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState(null);
+  const [geminiBinaryPath, setGeminiBinaryPath] = useState('');
+  const [geminiBinaryInfo, setGeminiBinaryInfo] = useState(null);
+  const [binaryValidation, setBinaryValidation] = useState(null);
+  const [binaryError, setBinaryError] = useState('');
+  const [isBinaryLoading, setIsBinaryLoading] = useState(false);
+  const [isSelectingBinary, setIsSelectingBinary] = useState(false);
+  const [isValidatingBinary, setIsValidatingBinary] = useState(false);
+
+  const isWindowsClient = typeof navigator !== 'undefined' &&
+    /Win/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || '');
 
   // Load saved settings
   useEffect(() => {
+    if (!isOpen) return;
+
     try {
       const savedSettings = localStorage.getItem('gemini-tools-settings');
       if (savedSettings) {
@@ -26,11 +39,40 @@ function ToolsSettings({ isOpen, onClose }) {
     } catch (error) {
       console.error('Error loading settings:', error);
     }
+
+    let cancelled = false;
+    setIsBinaryLoading(true);
+    setBinaryError('');
+    setBinaryValidation(null);
+
+    api.getGeminiBinarySettings()
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(result.error || t('toolsSettings.binaryLoadFailed'));
+        }
+        if (cancelled) return;
+        setGeminiBinaryInfo(result);
+        setGeminiBinaryPath(result.configuredPath || '');
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error('Error loading Gemini binary settings:', error);
+        setBinaryError(error.message || t('toolsSettings.binaryLoadFailed'));
+      })
+      .finally(() => {
+        if (!cancelled) setIsBinaryLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen]);
 
-  const saveSettings = () => {
+  const saveSettings = async () => {
     setIsSaving(true);
     setSaveStatus(null);
+    setBinaryError('');
 
     try {
       const current = JSON.parse(localStorage.getItem('gemini-tools-settings') || '{}');
@@ -49,15 +91,102 @@ function ToolsSettings({ isOpen, onClose }) {
         storageArea: localStorage
       }));
 
+      const binaryPath = geminiBinaryPath.trim();
+      const binaryResponse = binaryPath
+        ? await api.setGeminiBinary(binaryPath)
+        : await api.resetGeminiBinary();
+      const binaryResult = await binaryResponse.json().catch(() => ({}));
+      if (!binaryResponse.ok) {
+        throw new Error(binaryResult.error || t('toolsSettings.settingsFailed'));
+      }
+
+      setGeminiBinaryInfo(binaryResult);
+      setGeminiBinaryPath(binaryResult.configuredPath || '');
+      if (binaryResult.version) {
+        setBinaryValidation({
+          valid: true,
+          path: binaryResult.effectivePath,
+          version: binaryResult.version,
+          source: binaryResult.source
+        });
+      } else {
+        setBinaryValidation(null);
+      }
+
       setSaveStatus('success');
       setTimeout(() => setSaveStatus(null), 3000);
     } catch (error) {
       console.error('Error saving settings:', error);
+      setBinaryError(error.message || t('toolsSettings.settingsFailed'));
       setSaveStatus('error');
     } finally {
       setIsSaving(false);
     }
   };
+
+  const selectGeminiBinary = async () => {
+    if (isSelectingBinary) return;
+    setIsSelectingBinary(true);
+    setBinaryError('');
+    try {
+      const response = await api.selectGeminiBinaryFile(geminiBinaryPath.trim() || geminiBinaryInfo?.effectivePath || '');
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(result.error || t('toolsSettings.binaryPickerFailed'));
+      }
+      if (!result.cancelled && result.path) {
+        setGeminiBinaryPath(result.path);
+        setBinaryValidation(null);
+      }
+    } catch (error) {
+      console.error('Error selecting Gemini binary:', error);
+      setBinaryError(error.message || t('toolsSettings.binaryPickerFailed'));
+    } finally {
+      setIsSelectingBinary(false);
+    }
+  };
+
+  const validateGeminiBinary = async () => {
+    if (isValidatingBinary) return;
+    setIsValidatingBinary(true);
+    setBinaryError('');
+    setBinaryValidation(null);
+    try {
+      const response = await api.validateGeminiBinary(geminiBinaryPath.trim());
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.valid) {
+        throw new Error(result.error || t('toolsSettings.binaryInvalid'));
+      }
+      setBinaryValidation(result);
+    } catch (error) {
+      console.error('Error validating Gemini binary:', error);
+      setBinaryError(error.message || t('toolsSettings.binaryInvalid'));
+    } finally {
+      setIsValidatingBinary(false);
+    }
+  };
+
+  const resetGeminiBinaryPending = () => {
+    setGeminiBinaryPath('');
+    setBinaryValidation(null);
+    setBinaryError('');
+  };
+
+  const sourceLabel = (source) => {
+    if (source === 'development-override') return t('toolsSettings.developmentOverride');
+    if (source === 'configured') return t('toolsSettings.customBinary');
+    return t('toolsSettings.embeddedRuntime');
+  };
+
+  const persistedConfiguredPath = geminiBinaryInfo?.configuredPath || '';
+  const hasPendingBinaryChange = geminiBinaryPath.trim() !== persistedConfiguredPath;
+  const pendingEffectivePath = geminiBinaryPath.trim() || geminiBinaryInfo?.defaultPath || '';
+  const displayedEffectivePath = hasPendingBinaryChange
+    ? pendingEffectivePath
+    : (geminiBinaryInfo?.effectivePath || geminiBinaryInfo?.defaultPath || '');
+  const displayedSource = hasPendingBinaryChange
+    ? (geminiBinaryPath.trim() ? 'configured' : 'embedded')
+    : geminiBinaryInfo?.source;
 
   if (!isOpen) return null;
 
@@ -174,6 +303,114 @@ function ToolsSettings({ isOpen, onClose }) {
                 <option value="name">{language === 'zh' ? '按名称排序' : 'Alphabetical'}</option>
                 <option value="date">{language === 'zh' ? '按最近活动' : 'Recent Activity'}</option>
               </select>
+            </div>
+          </div>
+
+          {/* Gemini CLI Binary */}
+          <div className="bg-gray-50 dark:bg-gray-900/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <Terminal className="w-5 h-5 text-emerald-500 mt-0.5 flex-shrink-0" />
+              <div className="min-w-0 flex-1">
+                <div className="font-medium text-foreground">
+                  {t('toolsSettings.geminiBinaryTitle')}
+                </div>
+                <div className="text-xs text-muted-foreground mt-0.5">
+                  {t('toolsSettings.geminiBinaryDesc')}
+                </div>
+
+                <div className="mt-3 flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="text"
+                    value={geminiBinaryPath}
+                    onChange={(e) => {
+                      setGeminiBinaryPath(e.target.value);
+                      setBinaryValidation(null);
+                      setBinaryError('');
+                    }}
+                    placeholder={t('toolsSettings.geminiBinaryPlaceholder')}
+                    disabled={isBinaryLoading || isSaving}
+                    className="min-w-0 flex-1 h-9 px-3 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 disabled:opacity-50"
+                  />
+                  <div className="flex gap-2 flex-shrink-0">
+                    {isWindowsClient && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={selectGeminiBinary}
+                        disabled={isSelectingBinary || isBinaryLoading || isSaving}
+                        className="h-9 gap-1.5"
+                      >
+                        {isSelectingBinary ? (
+                          <div className="w-3.5 h-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                        ) : (
+                          <FolderOpen className="w-4 h-4" />
+                        )}
+                        {t('toolsSettings.selectBinary')}
+                      </Button>
+                    )}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={validateGeminiBinary}
+                      disabled={isValidatingBinary || isBinaryLoading || isSaving}
+                      className="h-9"
+                    >
+                      {isValidatingBinary ? t('toolsSettings.validatingBinary') : t('toolsSettings.validateBinary')}
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={resetGeminiBinaryPending}
+                    disabled={isBinaryLoading || isSaving}
+                    className="h-7 px-2 text-xs gap-1.5 text-muted-foreground"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    {t('toolsSettings.resetBinary')}
+                  </Button>
+                  {displayedSource && (
+                    <span className="text-[11px] px-2 py-0.5 rounded-full border border-border bg-background text-muted-foreground">
+                      {sourceLabel(displayedSource)}
+                    </span>
+                  )}
+                  {binaryValidation?.version && (
+                    <span className="text-[11px] text-muted-foreground">
+                      {t('toolsSettings.binaryVersion')}: {binaryValidation.version}
+                    </span>
+                  )}
+                </div>
+
+                <div className="mt-2 text-xs text-muted-foreground break-all">
+                  <span className="font-medium text-foreground/80">{t('toolsSettings.effectiveBinary')}:</span>{' '}
+                  {isBinaryLoading ? '...' : (displayedEffectivePath || '-')}
+                </div>
+
+                {hasPendingBinaryChange && !geminiBinaryPath.trim() && (
+                  <div className="mt-2 text-xs text-blue-600 dark:text-blue-400">
+                    {t('toolsSettings.binaryDefaultPending')}
+                  </div>
+                )}
+
+                {binaryValidation?.valid && (
+                  <div className="mt-2 text-xs text-green-600 dark:text-green-400 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0" />
+                    <span>{t('toolsSettings.binaryValid')}</span>
+                  </div>
+                )}
+
+                {binaryError && (
+                  <div className="mt-2 text-xs text-red-600 dark:text-red-400 flex items-start gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                    <span className="break-all">{binaryError}</span>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 

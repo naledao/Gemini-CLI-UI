@@ -2,8 +2,10 @@ import { spawn } from 'child_process';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'url';
 import sessionManager from './sessionManager.js';
 import GeminiResponseHandler from './gemini-response-handler.js';
+import { settingsDb } from './database/db.js';
 
 
 function resolveToolWorkingDirectory(toolName, params, workspaceRoot) {
@@ -33,6 +35,73 @@ function resolveToolWorkingDirectory(toolName, params, workspaceRoot) {
 }
 
 let activeGeminiProcesses = new Map(); // Track active processes by session ID
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const GEMINI_BINARY_SETTING_KEY = 'gemini_binary_path';
+
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getConfiguredGeminiBinaryPath() {
+  const configured = settingsDb.get(GEMINI_BINARY_SETTING_KEY);
+  return configured?.trim() || null;
+}
+
+async function resolveEmbeddedGeminiPath() {
+  const runtimeId = `${process.platform}-${process.arch}`;
+  const executableName = process.platform === 'win32' ? 'gemini.exe' : 'gemini';
+  const candidates = [
+    path.resolve(moduleDir, '..', 'runtime', runtimeId, executableName),
+    path.resolve(process.cwd(), 'runtime', runtimeId, executableName),
+    path.resolve(path.dirname(process.execPath), 'runtime', runtimeId, executableName)
+  ];
+
+  const uniqueCandidates = [...new Set(candidates)];
+  for (const candidate of uniqueCandidates) {
+    if (await fileExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  throw new Error(
+    `Embedded Gemini runtime is missing for ${runtimeId}. Expected ${executableName} in one of: ${uniqueCandidates.join(', ')}. ` +
+    `Build or install runtime/${runtimeId} before starting Gemini.`
+  );
+}
+
+async function resolveGeminiLaunch() {
+  const override = process.env.GEMINI_PATH?.trim();
+  if (override) {
+    const configuredPath = path.resolve(override.replace(/^"|"$/g, ''));
+    if (!(await fileExists(configuredPath))) {
+      throw new Error(`GEMINI_PATH does not exist: ${configuredPath}`);
+    }
+    if (/\.js$/i.test(configuredPath)) {
+      return { command: process.execPath, prefixArgs: [configuredPath], displayPath: configuredPath, source: 'development-override' };
+    }
+    return { command: configuredPath, prefixArgs: [], displayPath: configuredPath, source: 'development-override' };
+  }
+
+  const persistedPath = getConfiguredGeminiBinaryPath();
+  if (persistedPath) {
+    const configuredPath = path.resolve(persistedPath.replace(/^"|"$/g, ''));
+    if (!(await fileExists(configuredPath))) {
+      throw new Error(
+        `Configured Gemini CLI binary does not exist: ${configuredPath}. ` +
+        'Choose another binary in Settings or reset the setting to use the embedded runtime.'
+      );
+    }
+    return { command: configuredPath, prefixArgs: [], displayPath: configuredPath, source: 'configured' };
+  }
+
+  const embeddedPath = await resolveEmbeddedGeminiPath();
+  return { command: embeddedPath, prefixArgs: [], displayPath: embeddedPath, source: 'embedded' };
+}
 
 async function spawnGemini(command, options = {}, ws) {
   return new Promise(async (resolve, reject) => {
@@ -61,9 +130,8 @@ async function spawnGemini(command, options = {}, ws) {
     
     // Use cwd (actual project directory) instead of projectPath (Gemini's metadata directory)
     // Debug - cwd and projectPath
-    // Clean the path by removing any non-printable characters
-    const cleanPath = (cwd || process.cwd()).replace(/[^\x20-\x7E]/g, '').trim();
-    const workingDir = cleanPath;
+    // Keep Unicode paths intact (for example C:\项目\代码 on Windows).
+    const workingDir = path.resolve(String(cwd || process.cwd()).trim());
     // Debug - workingDir
     
     // Collect persistent attachment paths. New clients upload files before the
@@ -202,12 +270,12 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
     // Use stream-json output format for real-time tool calls and delta typing streaming
     args.push('-o', 'stream-json');
     
-    // Try to find gemini in PATH first, then fall back to environment variable
-    const geminiPath = process.env.GEMINI_PATH || 'gemini';
-    console.log('🚀 Spawning Gemini CLI:', geminiPath, args.join(' '));
+    const geminiLaunch = await resolveGeminiLaunch();
+    const launchArgs = [...geminiLaunch.prefixArgs, ...args];
+    console.log('🚀 Spawning Gemini CLI:', geminiLaunch.displayPath, args.join(' '));
     console.log('📂 Working directory:', workingDir);
     
-    const geminiProcess = spawn(geminiPath, args, {
+    const geminiProcess = spawn(geminiLaunch.command, launchArgs, {
       cwd: workingDir,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env }, // Inherit all environment variables
@@ -577,6 +645,10 @@ function abortGeminiSession(sessionId, runId = null) {
 }
 
 export {
+  GEMINI_BINARY_SETTING_KEY,
+  getConfiguredGeminiBinaryPath,
+  resolveEmbeddedGeminiPath,
+  resolveGeminiLaunch,
   spawnGemini,
   abortGeminiSession
 };

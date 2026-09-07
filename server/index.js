@@ -37,12 +37,19 @@ import fetch from 'node-fetch';
 import mime from 'mime-types';
 
 import { getProjects, getSessions, getSessionMessages, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache } from './projects.js';
-import { spawnGemini, abortGeminiSession } from './gemini-cli.js';
+import {
+  spawnGemini,
+  abortGeminiSession,
+  GEMINI_BINARY_SETTING_KEY,
+  getConfiguredGeminiBinaryPath,
+  resolveEmbeddedGeminiPath,
+  resolveGeminiLaunch
+} from './gemini-cli.js';
 import sessionManager from './sessionManager.js';
 import authRoutes from './routes/auth.js';
 import mcpRoutes from './routes/mcp.js';
 import gitRoutes from './routes/git.js';
-import { initializeDatabase } from './database/db.js';
+import { initializeDatabase, settingsDb } from './database/db.js';
 import { validateApiKey, authenticateToken, authenticateWebSocket } from './middleware/auth.js';
 
 // File system watcher for projects folder
@@ -222,6 +229,291 @@ app.get('/api/config', authenticateToken, (req, res) => {
     serverPort: PORT,
     wsUrl: `${protocol}://${host}`,
     geminiConfig
+  });
+});
+
+function isLoopbackRequest(req) {
+  const remoteAddress = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+  return remoteAddress === '127.0.0.1' ||
+    remoteAddress === '::1' ||
+    remoteAddress === '::ffff:127.0.0.1';
+}
+
+function validateGeminiBinaryLaunch(launch) {
+  return new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+
+    const child = spawn(
+      launch.command,
+      [...(launch.prefixArgs || []), '--version'],
+      {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+        shell: false,
+        env: { ...process.env }
+      }
+    );
+
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch {}
+      finish(new Error('Gemini CLI binary validation timed out after 8 seconds'));
+    }, 8000);
+
+    child.stdout.on('data', data => { stdout += data.toString(); });
+    child.stderr.on('data', data => { stderr += data.toString(); });
+    child.on('error', error => finish(new Error(`Failed to start Gemini CLI binary: ${error.message}`)));
+    child.on('close', code => {
+      if (code !== 0) {
+        return finish(new Error(stderr.trim() || stdout.trim() || `Gemini CLI binary exited with code ${code}`));
+      }
+
+      const version = (stdout.trim() || stderr.trim()).split(/\r?\n/).filter(Boolean)[0] || 'Unknown';
+      finish(null, {
+        valid: true,
+        path: launch.displayPath || launch.command,
+        version,
+        source: launch.source || 'configured'
+      });
+    });
+  });
+}
+
+async function getGeminiBinarySettingsSnapshot() {
+  const configuredPath = getConfiguredGeminiBinaryPath();
+  let defaultPath = null;
+  let defaultError = null;
+  let effectivePath = null;
+  let effectiveError = null;
+  let source = configuredPath ? 'configured' : 'embedded';
+
+  try {
+    defaultPath = await resolveEmbeddedGeminiPath();
+  } catch (error) {
+    defaultError = error.message;
+  }
+
+  try {
+    const launch = await resolveGeminiLaunch();
+    effectivePath = launch.displayPath;
+    source = launch.source || source;
+  } catch (error) {
+    effectiveError = error.message;
+  }
+
+  return {
+    configuredPath,
+    effectivePath,
+    defaultPath,
+    source,
+    platform: process.platform,
+    arch: process.arch,
+    defaultError,
+    effectiveError
+  };
+}
+
+async function createConfiguredGeminiLaunch(rawPath) {
+  if (typeof rawPath !== 'string' || !rawPath.trim()) {
+    throw new Error('Gemini CLI binary path is required');
+  }
+
+  const candidate = path.resolve(rawPath.trim().replace(/^"|"$/g, ''));
+  const stat = await fsPromises.stat(candidate).catch(() => null);
+  if (!stat || !stat.isFile()) {
+    throw new Error(`Gemini CLI binary does not exist or is not a file: ${candidate}`);
+  }
+
+  return {
+    command: candidate,
+    prefixArgs: [],
+    displayPath: candidate,
+    source: 'configured'
+  };
+}
+
+app.get('/api/settings/gemini-binary', authenticateToken, async (req, res) => {
+  try {
+    res.json(await getGeminiBinarySettingsSnapshot());
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/settings/gemini-binary', authenticateToken, async (req, res) => {
+  try {
+    const launch = await createConfiguredGeminiLaunch(req.body?.path);
+    const validation = await validateGeminiBinaryLaunch(launch);
+    settingsDb.set(GEMINI_BINARY_SETTING_KEY, launch.displayPath);
+    res.json({
+      ...(await getGeminiBinarySettingsSnapshot()),
+      version: validation.version,
+      valid: true
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message, valid: false });
+  }
+});
+
+app.delete('/api/settings/gemini-binary', authenticateToken, async (req, res) => {
+  try {
+    settingsDb.delete(GEMINI_BINARY_SETTING_KEY);
+    res.json(await getGeminiBinarySettingsSnapshot());
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/settings/gemini-binary/validate', authenticateToken, async (req, res) => {
+  try {
+    const requestedPath = typeof req.body?.path === 'string' ? req.body.path.trim() : '';
+    let launch;
+    if (requestedPath) {
+      launch = await createConfiguredGeminiLaunch(requestedPath);
+    } else {
+      const embeddedPath = await resolveEmbeddedGeminiPath();
+      launch = {
+        command: embeddedPath,
+        prefixArgs: [],
+        displayPath: embeddedPath,
+        source: 'embedded'
+      };
+    }
+    res.json(await validateGeminiBinaryLaunch(launch));
+  } catch (error) {
+    res.status(400).json({ valid: false, error: error.message });
+  }
+});
+
+app.post('/api/system/select-gemini-binary', authenticateToken, (req, res) => {
+  if (process.platform !== 'win32') {
+    return res.status(501).json({ error: 'Native binary selection is only available on Windows' });
+  }
+
+  if (!isLoopbackRequest(req)) {
+    return res.status(403).json({ error: 'Native binary selection is only available from this computer' });
+  }
+
+  const initialPath = typeof req.body?.initialPath === 'string' ? req.body.initialPath.trim() : '';
+  const powerShellScript = [
+    'Add-Type -AssemblyName System.Windows.Forms',
+    '$dialog = New-Object System.Windows.Forms.OpenFileDialog',
+    "$dialog.Title = 'Select Gemini CLI binary'",
+    "$dialog.Filter = 'Executable files (*.exe)|*.exe|All files (*.*)|*.*'",
+    '$dialog.CheckFileExists = $true',
+    '$dialog.Multiselect = $false',
+    "if ($env:GEMINI_CLI_UI_INITIAL_BINARY) { if (Test-Path -LiteralPath $env:GEMINI_CLI_UI_INITIAL_BINARY -PathType Leaf) { $dialog.InitialDirectory = Split-Path -Parent $env:GEMINI_CLI_UI_INITIAL_BINARY; $dialog.FileName = Split-Path -Leaf $env:GEMINI_CLI_UI_INITIAL_BINARY } elseif (Test-Path -LiteralPath $env:GEMINI_CLI_UI_INITIAL_BINARY -PathType Container) { $dialog.InitialDirectory = $env:GEMINI_CLI_UI_INITIAL_BINARY } }",
+    '$result = $dialog.ShowDialog()',
+    'if ($result -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.FileName) }',
+    '$dialog.Dispose()'
+  ].join('; ');
+
+  const picker = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-STA', '-Command', powerShellScript], {
+    windowsHide: false,
+    env: {
+      ...process.env,
+      GEMINI_CLI_UI_INITIAL_BINARY: initialPath
+    }
+  });
+
+  let stdout = '';
+  let stderr = '';
+  let responded = false;
+  picker.stdout.on('data', data => { stdout += data.toString(); });
+  picker.stderr.on('data', data => { stderr += data.toString(); });
+  picker.on('error', error => {
+    if (responded) return;
+    responded = true;
+    res.status(500).json({ error: `Failed to open the Windows binary picker: ${error.message}` });
+  });
+  picker.on('close', code => {
+    if (responded) return;
+    responded = true;
+    if (code !== 0) {
+      return res.status(500).json({ error: stderr.trim() || `Windows binary picker exited with code ${code}` });
+    }
+    const selectedPath = stdout.trim();
+    res.json({ path: selectedPath || null, cancelled: !selectedPath });
+  });
+});
+
+// Open the native Windows folder picker on the computer running this server.
+// Restrict it to loopback callers so a remote browser cannot trigger desktop UI.
+app.post('/api/system/select-folder', authenticateToken, (req, res) => {
+  if (process.platform !== 'win32') {
+    return res.status(501).json({ error: 'Native folder selection is only available on Windows' });
+  }
+
+  if (!isLoopbackRequest(req)) {
+    return res.status(403).json({ error: 'Native folder selection is only available from this computer' });
+  }
+
+  const initialPath = typeof req.body?.initialPath === 'string' ? req.body.initialPath.trim() : '';
+  const powerShellScript = [
+    'Add-Type -AssemblyName System.Windows.Forms',
+    '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
+    "$dialog.Description = 'Select project folder'",
+    '$dialog.ShowNewFolderButton = $true',
+    "if ($env:GEMINI_CLI_UI_INITIAL_FOLDER -and (Test-Path -LiteralPath $env:GEMINI_CLI_UI_INITIAL_FOLDER -PathType Container)) { $dialog.SelectedPath = $env:GEMINI_CLI_UI_INITIAL_FOLDER }",
+    '$result = $dialog.ShowDialog()',
+    'if ($result -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.SelectedPath) }',
+    '$dialog.Dispose()'
+  ].join('; ');
+
+  const picker = spawn(
+    'powershell.exe',
+    ['-NoLogo', '-NoProfile', '-STA', '-Command', powerShellScript],
+    {
+      windowsHide: false,
+      env: {
+        ...process.env,
+        GEMINI_CLI_UI_INITIAL_FOLDER: initialPath
+      }
+    }
+  );
+
+  let stdout = '';
+  let stderr = '';
+  let responded = false;
+
+  picker.stdout.on('data', (data) => {
+    stdout += data.toString();
+  });
+  picker.stderr.on('data', (data) => {
+    stderr += data.toString();
+  });
+
+  picker.on('error', (error) => {
+    if (responded) return;
+    responded = true;
+    console.error('Failed to start Windows folder picker:', error);
+    res.status(500).json({ error: 'Failed to open the Windows folder picker' });
+  });
+
+  picker.on('close', (code) => {
+    if (responded) return;
+    responded = true;
+
+    if (code !== 0) {
+      console.error('Windows folder picker failed:', stderr.trim() || `exit code ${code}`);
+      return res.status(500).json({ error: 'Failed to open the Windows folder picker' });
+    }
+
+    const selectedPath = stdout.trim();
+    if (!selectedPath) {
+      return res.json({ path: null, cancelled: true });
+    }
+
+    return res.json({ path: selectedPath, cancelled: false });
   });
 });
 

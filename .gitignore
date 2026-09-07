@@ -137,3 +137,9 @@ user_uploads/
 # Binary build outputs and temporary assets
 bin/
 /image.png
+
+# Embedded Gemini runtime build-only scratch/cache
+.runtime-build/
+.runtime-tools/
+.runtime-node/
+runtime/

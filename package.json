@@ -11,7 +11,9 @@
     "build": "vite build",
     "build:binary": "npm run build && mkdir -p bin && caxa --input . --output ./bin/gemini-cli-ui --exclude 'src/**' '.git/**' 'node_modules/.cache/**' 'public/screenshots/**' 'image.png' -- \"{{caxa}}/node_modules/.bin/node\" \"{{caxa}}/server/index.js\"",
     "preview": "vite preview",
-    "start": "npm run build && npm run server"
+    "start": "npm run build && npm run server",
+    "runtime:build:win32-x64": "node scripts/build-gemini-runtime.mjs win32-x64",
+    "runtime:verify:win32-x64": "node scripts/verify-gemini-runtime.mjs win32-x64"
   },
   "keywords": [
     "gemini",

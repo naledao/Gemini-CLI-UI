@@ -63,6 +63,32 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path }),
     }),
+  selectFolder: (initialPath = '') =>
+    authenticatedFetch('/api/system/select-folder', {
+      method: 'POST',
+      body: JSON.stringify({ initialPath }),
+    }),
+  getGeminiBinarySettings: () =>
+    authenticatedFetch('/api/settings/gemini-binary'),
+  setGeminiBinary: (path) =>
+    authenticatedFetch('/api/settings/gemini-binary', {
+      method: 'PUT',
+      body: JSON.stringify({ path }),
+    }),
+  resetGeminiBinary: () =>
+    authenticatedFetch('/api/settings/gemini-binary', {
+      method: 'DELETE',
+    }),
+  validateGeminiBinary: (path = '') =>
+    authenticatedFetch('/api/settings/gemini-binary/validate', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
+  selectGeminiBinaryFile: (initialPath = '') =>
+    authenticatedFetch('/api/system/select-gemini-binary', {
+      method: 'POST',
+      body: JSON.stringify({ initialPath }),
+    }),
   getDirectories: (searchPath = '') =>
     authenticatedFetch(`/api/filesystem/directories?path=${encodeURIComponent(searchPath)}`),
   readFile: (projectName, filePath) =>
