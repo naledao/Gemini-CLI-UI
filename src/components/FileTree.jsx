@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ScrollArea } from './ui/scroll-area';
 import { Button } from './ui/button';
-import { Folder, FolderOpen, File, FileText, FileCode, List, TableProperties, Eye, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
+import { Folder, FolderOpen, File, FileText, FileCode, List, TableProperties, Eye, RefreshCw, ChevronDown, ChevronRight, Copy } from 'lucide-react';
 import { cn } from '../lib/utils';
 import FileViewer from './FileViewer';
 import { api } from '../utils/api';
@@ -15,6 +15,7 @@ function FileTree({ selectedProject }) {
   const [expandedDirs, setExpandedDirs] = useState(new Set());
   const [selectedFile, setSelectedFile] = useState(null);
   const [viewMode, setViewMode] = useState('detailed'); // 'simple', 'detailed', 'compact'
+  const [contextMenu, setContextMenu] = useState(null);
 
   useEffect(() => {
     if (selectedProject) {
@@ -29,6 +30,29 @@ function FileTree({ selectedProject }) {
       setViewMode(savedViewMode);
     }
   }, []);
+
+  useEffect(() => {
+    if (!contextMenu) return undefined;
+
+    const closeContextMenu = () => setContextMenu(null);
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        closeContextMenu();
+      }
+    };
+
+    window.addEventListener('click', closeContextMenu);
+    window.addEventListener('blur', closeContextMenu);
+    window.addEventListener('resize', closeContextMenu);
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.removeEventListener('click', closeContextMenu);
+      window.removeEventListener('blur', closeContextMenu);
+      window.removeEventListener('resize', closeContextMenu);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [contextMenu]);
 
   const fetchFiles = async () => {
     setLoading(true);
@@ -76,6 +100,49 @@ function FileTree({ selectedProject }) {
     setExpandedDirs(newExpanded);
   };
 
+  const openContextMenu = (event, item) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const menuWidth = 176;
+    const menuHeight = 44;
+    const margin = 8;
+    const maxX = Math.max(margin, window.innerWidth - menuWidth - margin);
+    const maxY = Math.max(margin, window.innerHeight - menuHeight - margin);
+
+    setContextMenu({
+      x: Math.min(Math.max(event.clientX, margin), maxX),
+      y: Math.min(Math.max(event.clientY, margin), maxY),
+      path: item.path
+    });
+  };
+
+  const copyContextMenuPath = async () => {
+    const fullPath = contextMenu?.path;
+    if (!fullPath) return;
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(fullPath);
+      } else {
+        throw new Error('Clipboard API unavailable');
+      }
+    } catch (error) {
+      const textarea = document.createElement('textarea');
+      textarea.value = fullPath;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    } finally {
+      setContextMenu(null);
+    }
+  };
+
   // Change view mode and save preference
   const changeViewMode = (mode) => {
     setViewMode(mode);
@@ -114,6 +181,7 @@ function FileTree({ selectedProject }) {
             "w-full justify-start p-2 h-auto font-normal text-left hover:bg-accent",
           )}
           style={{ paddingLeft: `${level * 16 + 12}px` }}
+          onContextMenu={(event) => openContextMenu(event, item)}
           onClick={() => {
             if (item.type === 'directory') {
               toggleDirectory(item.path);
@@ -199,6 +267,7 @@ function FileTree({ selectedProject }) {
             "grid grid-cols-12 gap-2 p-2 hover:bg-accent cursor-pointer items-center transition-colors",
           )}
           style={{ paddingLeft: `${level * 16 + 12}px` }}
+          onContextMenu={(event) => openContextMenu(event, item)}
           onClick={() => {
             if (item.type === 'directory') {
               toggleDirectory(item.path);
@@ -275,6 +344,7 @@ function FileTree({ selectedProject }) {
             "flex items-center justify-between p-2 hover:bg-accent cursor-pointer transition-colors",
           )}
           style={{ paddingLeft: `${level * 16 + 12}px` }}
+          onContextMenu={(event) => openContextMenu(event, item)}
           onClick={() => {
             if (item.type === 'directory') {
               toggleDirectory(item.path);
@@ -429,6 +499,24 @@ function FileTree({ selectedProject }) {
           </div>
         )}
       </ScrollArea>
+
+      {contextMenu && (
+        <div
+          className="fixed z-[100] w-44 rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-lg"
+          style={{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }}
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-sm hover:bg-accent hover:text-accent-foreground transition-colors"
+            onClick={copyContextMenuPath}
+          >
+            <Copy className="h-4 w-4 flex-shrink-0" />
+            <span>{language === 'zh' ? '复制完整路径' : 'Copy full path'}</span>
+          </button>
+        </div>
+      )}
       
       {/* Unified File Viewer Modal */}
       {selectedFile && (
