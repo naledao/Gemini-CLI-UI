@@ -5,6 +5,33 @@ import os from 'os';
 import sessionManager from './sessionManager.js';
 import GeminiResponseHandler from './gemini-response-handler.js';
 
+
+function resolveToolWorkingDirectory(toolName, params, workspaceRoot) {
+  const nonFsTools = new Set([
+    'google_web_search',
+    'web_search',
+    'web_fetch',
+    'update_topic',
+    'activate_skill',
+    'enter_plan_mode'
+  ]);
+  if (nonFsTools.has(toolName)) {
+    return null;
+  }
+
+  const p = params || {};
+  const rawWorkdir = p.dir_path || p.workdir || p.cwd;
+  if (rawWorkdir && typeof rawWorkdir === 'string' && rawWorkdir.trim()) {
+    const trimmed = rawWorkdir.trim();
+    if (path.isAbsolute(trimmed)) {
+      return path.normalize(trimmed);
+    }
+    return path.resolve(workspaceRoot, trimmed);
+  }
+
+  return workspaceRoot;
+}
+
 let activeGeminiProcesses = new Map(); // Track active processes by session ID
 
 async function spawnGemini(command, options = {}, ws) {
@@ -224,6 +251,7 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
     
     // Handle stdout with JSON stream line buffering
     let lineBuffer = '';
+    const toolWorkingDirs = new Map();
     
     geminiProcess.stdout.on('data', (data) => {
       hasReceivedOutput = true;
@@ -283,16 +311,30 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
               }
             }
           } else if (event.type === 'tool_use') {
+            const toolId = event.tool_id || `call_${Date.now()}`;
+            const resolvedWd = resolveToolWorkingDirectory(event.tool_name, event.parameters, workingDir);
+            if (toolId && resolvedWd) {
+              toolWorkingDirs.set(toolId, resolvedWd);
+            }
             // Real-time tool invocation event
             ws.send(JSON.stringify({
               type: 'gemini-tool-use',
               tool: {
-                id: event.tool_id || `call_${Date.now()}`,
+                id: toolId,
                 name: event.tool_name,
-                input: event.parameters
+                input: event.parameters,
+                workingDirectory: resolvedWd,
+                workspaceRoot: workingDir,
+                context: {
+                  connector: 'gemini-cli',
+                  workspaceRoot: workingDir,
+                  workingDirectory: resolvedWd
+                }
               }
             }));
           } else if (event.type === 'tool_result') {
+            const toolId = event.tool_id;
+            const resolvedWd = (toolId && toolWorkingDirs.get(toolId)) ?? resolveToolWorkingDirectory(null, null, workingDir);
             // Real-time tool execution result event
             ws.send(JSON.stringify({
               type: 'gemini-tool-result',
@@ -300,7 +342,14 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
                 toolId: event.tool_id,
                 status: event.status,
                 content: event.output,
-                isError: event.status !== 'success'
+                isError: event.status !== 'success',
+                workingDirectory: resolvedWd,
+                workspaceRoot: workingDir,
+                context: {
+                  connector: 'gemini-cli',
+                  workspaceRoot: workingDir,
+                  workingDirectory: resolvedWd
+                }
               }
             }));
           } else if (event.type === 'message' && event.role === 'assistant') {

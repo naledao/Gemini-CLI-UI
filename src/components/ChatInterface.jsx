@@ -797,6 +797,9 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
                 isToolUse: true,
                 toolName: part.name,
                 toolInput: JSON.stringify(part.input),
+                workingDirectory: part.workingDirectory || part.input?.dir_path || part.input?.workdir || part.input?.cwd || toolResult?.workingDirectory || null,
+                workspaceRoot: part.workspaceRoot || toolResult?.workspaceRoot || null,
+                context: part.context || toolResult?.context || null,
                 toolResult: toolResult ? (typeof toolResult.content === 'string' ? toolResult.content : JSON.stringify(toolResult.content)) : null,
                 toolError: toolResult?.isError || false,
                 toolResultTimestamp: toolResult?.timestamp || new Date()
@@ -1082,6 +1085,9 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
                   toolName: part.name,
                   toolInput: toolInput,
                   toolId: part.id,
+                  workingDirectory: part.workingDirectory || part.input?.dir_path || part.input?.workdir || part.input?.cwd || null,
+                  workspaceRoot: part.workspaceRoot || null,
+                  context: part.context || null,
                   toolResult: null // Will be updated when result comes in
                 }]);
                 
@@ -1153,7 +1159,10 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
               toolName: toolData.name,
               toolInput: toolInput,
               toolId: toolData.id,
-              toolResult: null
+              toolResult: null,
+              workingDirectory: toolData.workingDirectory || null,
+              workspaceRoot: toolData.workspaceRoot || null,
+              context: toolData.context || null
             }]);
             setGeminiStatus({
               text: language === 'zh' ? `正在调用工具: ${toolData.name}` : `Running tool: ${toolData.name}`,
@@ -1171,9 +1180,13 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
               if (msg.isToolUse && msg.toolId === resData.toolId) {
                 return {
                   ...msg,
+                  workingDirectory: msg.workingDirectory || resData.workingDirectory || null,
+                  workspaceRoot: msg.workspaceRoot || resData.workspaceRoot || null,
+                  context: msg.context || resData.context || null,
                   toolResult: {
                     content: resData.content,
                     isError: resData.isError,
+                    workingDirectory: resData.workingDirectory || msg.workingDirectory || null,
                     timestamp: new Date()
                   }
                 };
