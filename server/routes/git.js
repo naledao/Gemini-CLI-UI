@@ -1,5 +1,5 @@
 import express from 'express';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import { promises as fs } from 'fs';
@@ -7,6 +7,7 @@ import { extractProjectDirectory } from '../projects.js';
 
 const router = express.Router();
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // Helper function to get the actual project path from the encoded project name
 async function getActualProjectPath(projectName) {
@@ -132,6 +133,121 @@ router.get('/status', async (req, res) => {
         ? error.message
         : `Failed to get git status: ${error.message}`
     });
+  }
+});
+
+// Expand an untracked directory into the actual untracked files it contains.
+// Plain `git status --porcelain` collapses whole directories to entries such
+// as `?? src/`, which cannot be passed to the file diff endpoint.
+router.get('/untracked-files', async (req, res) => {
+  const { project, dir } = req.query;
+
+  if (!project || !dir) {
+    return res.status(400).json({ error: 'Project name and directory path are required' });
+  }
+
+  try {
+    const projectPath = await getActualProjectPath(project);
+    await validateGitRepository(projectPath);
+
+    const normalizedDir = String(dir).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+    if (!normalizedDir || normalizedDir === '.' || path.isAbsolute(normalizedDir) || normalizedDir.split('/').includes('..')) {
+      return res.status(400).json({ error: 'Invalid directory path' });
+    }
+
+    const absoluteDir = path.resolve(projectPath, normalizedDir);
+    const relativeDir = path.relative(path.resolve(projectPath), absoluteDir);
+    if (relativeDir.startsWith('..') || path.isAbsolute(relativeDir)) {
+      return res.status(400).json({ error: 'Invalid directory path' });
+    }
+
+    const stat = await fs.stat(absoluteDir);
+    if (!stat.isDirectory()) {
+      return res.status(400).json({ error: 'Path is not a directory' });
+    }
+
+    const { stdout } = await execFileAsync(
+      'git',
+      ['ls-files', '--others', '--exclude-standard', '-z', '--', normalizedDir],
+      { cwd: projectPath, maxBuffer: 20 * 1024 * 1024, encoding: 'utf8' }
+    );
+
+    const files = stdout.split('\0').filter(Boolean).sort((a, b) => a.localeCompare(b));
+    res.json({ directory: `${normalizedDir}/`, files });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Read a text file from inside the selected Git repository for rich previews.
+// Only repository-relative paths are accepted and symlinks are resolved before
+// the file is read so callers cannot escape the selected project root.
+router.get('/file-content', async (req, res) => {
+  const { project, file } = req.query;
+
+  if (!project || !file) {
+    return res.status(400).json({ error: 'Project name and file path are required' });
+  }
+
+  try {
+    const projectPath = await getActualProjectPath(project);
+    await validateGitRepository(projectPath);
+
+    const normalizedFile = String(file).replace(/\\/g, '/').replace(/^\.\//, '');
+    if (!normalizedFile || path.isAbsolute(normalizedFile) || normalizedFile.split('/').includes('..')) {
+      return res.status(400).json({ error: 'Invalid file path' });
+    }
+
+    const projectRoot = path.resolve(projectPath);
+    const absoluteFile = path.resolve(projectRoot, normalizedFile);
+    const relativeFile = path.relative(projectRoot, absoluteFile);
+    if (relativeFile.startsWith('..') || path.isAbsolute(relativeFile)) {
+      return res.status(400).json({ error: 'Invalid file path' });
+    }
+
+    const [realProjectRoot, realFile] = await Promise.all([
+      fs.realpath(projectRoot),
+      fs.realpath(absoluteFile)
+    ]);
+    const realRelative = path.relative(realProjectRoot, realFile);
+    if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
+      return res.status(400).json({ error: 'File resolves outside the project directory' });
+    }
+
+    const stat = await fs.stat(realFile);
+    if (!stat.isFile()) {
+      return res.status(400).json({ error: 'Path is not a regular file' });
+    }
+
+    const maxSize = 2 * 1024 * 1024;
+    if (stat.size > maxSize) {
+      return res.status(413).json({ error: 'File is too large to preview (maximum 2 MiB)' });
+    }
+
+    const handle = await fs.open(realFile, 'r');
+    try {
+      const probeSize = Math.min(8192, stat.size);
+      if (probeSize > 0) {
+        const probe = Buffer.alloc(probeSize);
+        const { bytesRead } = await handle.read(probe, 0, probeSize, 0);
+        if (probe.subarray(0, bytesRead).includes(0)) {
+          return res.status(415).json({ error: 'Binary files cannot be previewed as text' });
+        }
+      }
+    } finally {
+      await handle.close();
+    }
+
+    const content = await fs.readFile(realFile, 'utf8');
+    res.json({ file: normalizedFile, size: stat.size, content });
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    if (error.code === 'EACCES') {
+      return res.status(403).json({ error: 'Permission denied' });
+    }
+    res.status(500).json({ error: error.message });
   }
 });
 

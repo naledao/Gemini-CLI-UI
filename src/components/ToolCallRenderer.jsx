@@ -14,9 +14,9 @@ import {
 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 
-export default function ToolCallRenderer({ message, onFileOpen, autoExpandTools = false }) {
+export default function ToolCallRenderer({ message, onFileOpen }) {
   const { t, language } = useLanguage();
-  const [isExpanded, setIsExpanded] = useState(autoExpandTools);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   // Parse input parameters safely
   let inputParams = {};

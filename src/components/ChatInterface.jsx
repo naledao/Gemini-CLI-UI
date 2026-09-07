@@ -21,7 +21,7 @@ import ReactMarkdown from 'react-markdown';
 import { useDropzone } from 'react-dropzone';
 import TodoList from './TodoList';
 import GeminiLogo from './GeminiLogo.jsx';
-import { Sparkles, Square } from 'lucide-react';
+import { Sparkles, Square, Paperclip, FileText } from 'lucide-react';
 import { EnhancedMessageRenderer } from './EnhancedMessageRenderer';
 import ToolCallRenderer from './ToolCallRenderer';
 import { MicButton } from './MicButton.jsx';
@@ -29,46 +29,64 @@ import { api } from '../utils/api';
 import { playNotificationSound } from '../utils/notificationSound';
 import { useLanguage } from '../contexts/LanguageContext';
 
+const formatAttachmentSize = (bytes = 0) => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const isImageAttachment = (file) => {
+  if (file?.type?.startsWith('image/')) return true;
+  const ext = file?.name?.split('.').pop()?.toLowerCase();
+  return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'].includes(ext);
+};
+
+const GEMINI_RUNTIME_MESSAGE_TYPES = new Set([
+  'session-created',
+  'gemini-response',
+  'gemini-tool-use',
+  'gemini-tool-result',
+  'gemini-delta',
+  'gemini-output',
+  'gemini-interactive-prompt',
+  'gemini-error',
+  'gemini-complete',
+  'gemini-status',
+  'gemini-stats',
+  'session-aborted'
+]);
+
+const normalizeProjectPath = (value = '') => String(value || '').replace(/\\/g, '/').replace(/\/$/, '');
+
+const isGeminiRuntimeMessage = (message) => {
+  if (!message) return false;
+  if (GEMINI_RUNTIME_MESSAGE_TYPES.has(message.type)) return true;
+  return message.type === 'error' && !!(message.projectName || message.projectPath || message.runId);
+};
+
+const messageBelongsToProject = (message, project) => {
+  if (!project || !isGeminiRuntimeMessage(message)) return false;
+  if (message.projectName) return message.projectName === project.name;
+  if (message.projectPath) {
+    return normalizeProjectPath(message.projectPath) === normalizeProjectPath(project.path);
+  }
+  // Runtime messages without ownership are unsafe once multiple projects can
+  // run concurrently, so do not attach them to whichever project is visible.
+  return false;
+};
+
 // Memoized message component to prevent unnecessary re-renders
-const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFileOpen, onShowSettings, autoExpandTools, showRawParameters }) => {
+const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFileOpen, onShowSettings, showRawParameters, withinAssistantGroup = false }) => {
   const { t, language } = useLanguage();
-  const isGrouped = prevMessage && prevMessage.type === message.type && 
+  const isGrouped = withinAssistantGroup || (prevMessage && prevMessage.type === message.type && 
                    prevMessage.type === 'assistant' && 
-                   !prevMessage.isToolUse && !message.isToolUse;
-  const messageRef = React.useRef(null);
-  const [isExpanded, setIsExpanded] = React.useState(false);
-  React.useEffect(() => {
-    if (!autoExpandTools || !messageRef.current || !message.isToolUse) return;
-    
-    const observer = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting && !isExpanded) {
-            setIsExpanded(true);
-            // Find all details elements and open them
-            const details = messageRef.current.querySelectorAll('details');
-            details.forEach(detail => {
-              detail.open = true;
-            });
-          }
-        });
-      },
-      { threshold: 0.1 }
-    );
-    
-    observer.observe(messageRef.current);
-    
-    return () => {
-      if (messageRef.current) {
-        observer.unobserve(messageRef.current);
-      }
-    };
-  }, [autoExpandTools, isExpanded, message.isToolUse]);
+                   !prevMessage.isToolUse && !message.isToolUse);
 
   return (
     <div
-      ref={messageRef}
-      className={`chat-message ${message.type} ${isGrouped ? 'grouped' : ''} ${message.type === 'user' ? 'flex justify-end px-3 sm:px-0' : 'px-3 sm:px-0'}`}
+      className={withinAssistantGroup
+        ? 'w-full'
+        : `chat-message ${message.type} ${isGrouped ? 'grouped' : ''} ${message.type === 'user' ? 'flex justify-end px-3 sm:px-0' : 'px-3 sm:px-0'}`}
       style={{ minHeight: '1px' }} // Prevent collapse
     >
       {message.type === 'system' ? (
@@ -95,6 +113,35 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
                     className="rounded-lg max-w-full h-auto cursor-pointer hover:opacity-90 transition-opacity"
                     onClick={() => window.open(img.data, '_blank')}
                   />
+                ))}
+              </div>
+            )}
+            {message.attachments && message.attachments.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {message.attachments.map((attachment, idx) => (
+                  attachment.isImage && attachment.data ? (
+                    <img
+                      key={`${attachment.path || attachment.name}-${idx}`}
+                      src={attachment.data}
+                      alt={attachment.name}
+                      className="rounded-lg max-w-40 max-h-32 object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                      onClick={() => window.open(attachment.data, '_blank')}
+                    />
+                  ) : (
+                    <button
+                      key={`${attachment.path || attachment.name}-${idx}`}
+                      type="button"
+                      onClick={() => attachment.path && onFileOpen && onFileOpen(attachment.path)}
+                      className="max-w-full flex items-center gap-2 rounded-lg bg-white/15 hover:bg-white/20 px-2.5 py-2 text-left transition-colors"
+                      title={attachment.path || attachment.name}
+                    >
+                      <FileText className="w-4 h-4 flex-shrink-0" />
+                      <span className="min-w-0">
+                        <span className="block text-xs font-medium truncate">{attachment.name}</span>
+                        <span className="block text-[10px] text-blue-100">{formatAttachmentSize(attachment.size)}</span>
+                      </span>
+                    </button>
+                  )
                 ))}
               </div>
             )}
@@ -134,7 +181,6 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
               <ToolCallRenderer
                 message={message}
                 onFileOpen={onFileOpen}
-                autoExpandTools={autoExpandTools}
               />
             ) : message.isInteractivePrompt ? (
               // Special handling for interactive prompts
@@ -302,9 +348,11 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
               </div>
             )}
             
-            <div className={`text-xs text-gray-500 dark:text-gray-400 mt-1 ${isGrouped ? 'opacity-0 group-hover:opacity-100' : ''}`}>
-              {new Date(message.timestamp).toLocaleTimeString()}
-            </div>
+            {!withinAssistantGroup && (
+              <div className={`text-xs text-gray-500 dark:text-gray-400 mt-1 ${isGrouped ? 'opacity-0 group-hover:opacity-100' : ''}`}>
+                {new Date(message.timestamp).toLocaleTimeString()}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -312,22 +360,137 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
   );
 });
 
-// ImageAttachment component for displaying image previews
-const ImageAttachment = ({ file, onRemove, uploadProgress, error }) => {
+// Presentation-only grouping. The underlying chatMessages array intentionally
+// stays flat so WebSocket updates, tool-result matching, persistence and
+// historical session conversion keep their existing data model.
+const groupMessagesForDisplay = (messages, isLoading) => {
+  const groups = [];
+  let currentAssistantGroup = null;
+
+  messages.forEach((message, index) => {
+    if (message?.type === 'assistant') {
+      if (!currentAssistantGroup) {
+        currentAssistantGroup = {
+          kind: 'assistant-group',
+          id: `assistant-group-${message.id || String(message.timestamp || index)}-${index}`,
+          messages: [],
+          isLoading: false
+        };
+        groups.push(currentAssistantGroup);
+      }
+      currentAssistantGroup.messages.push(message);
+      return;
+    }
+
+    // User/system/error entries remain standalone and delimit an assistant
+    // presentation group so their original ordering is never changed.
+    currentAssistantGroup = null;
+    groups.push({
+      kind: 'message',
+      id: `message-${message?.id || String(message?.timestamp || index)}-${index}`,
+      message
+    });
+  });
+
+  if (isLoading) {
+    const lastGroup = groups[groups.length - 1];
+    if (lastGroup?.kind === 'assistant-group') {
+      lastGroup.isLoading = true;
+    } else {
+      groups.push({
+        kind: 'assistant-group',
+        id: `assistant-group-loading-${groups.length}`,
+        messages: [],
+        isLoading: true
+      });
+    }
+  }
+
+  return groups;
+};
+
+const AssistantMessageGroup = memo(({
+  group,
+  createDiff,
+  onFileOpen,
+  onShowSettings,
+  showRawParameters,
+  statusText,
+  elapsedTime
+}) => {
+  const lastMessage = group.messages[group.messages.length - 1];
+  const timestamp = lastMessage?.timestamp || new Date();
+
+  return (
+    <div className="chat-message assistant px-3 sm:px-0">
+      <div className="w-full">
+        <div className="flex items-center space-x-2 mb-2">
+          <div className="w-7 h-7 rounded-full flex items-center justify-center text-white text-sm flex-shrink-0 p-0.5">
+            <GeminiLogo className="w-full h-full" />
+          </div>
+          <div className="text-xs font-medium text-gray-900 dark:text-white">Gemini</div>
+        </div>
+
+        <div className="space-y-2">
+          {group.messages.map((message, index) => (
+            <MessageComponent
+              key={`${message.id || index}-${message.timestamp}`}
+              message={message}
+              index={index}
+              prevMessage={index > 0 ? group.messages[index - 1] : null}
+              createDiff={createDiff}
+              onFileOpen={onFileOpen}
+              onShowSettings={onShowSettings}
+              showRawParameters={showRawParameters}
+              withinAssistantGroup
+            />
+          ))}
+
+          {group.isLoading && (
+            <div className="flex items-center gap-2 py-1 text-sm text-gray-500 dark:text-gray-400">
+              <span className="animate-pulse text-primary">✻</span>
+              <span>{statusText}...</span>
+              <span className="text-xs font-mono text-gray-400 dark:text-gray-500">({elapsedTime}s)</span>
+            </div>
+          )}
+        </div>
+
+        {group.messages.length > 0 && (
+          <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            {new Date(timestamp).toLocaleTimeString()}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
+
+// Unified attachment preview for images and regular files before sending.
+const AttachmentPreview = ({ file, onRemove, error }) => {
   const [preview, setPreview] = useState(null);
+  const isImage = isImageAttachment(file);
   
   useEffect(() => {
+    if (!isImage) {
+      setPreview(null);
+      return undefined;
+    }
     const url = URL.createObjectURL(file);
     setPreview(url);
     return () => URL.revokeObjectURL(url);
-  }, [file]);
+  }, [file, isImage]);
   
   return (
-    <div className="relative group">
-      <img src={preview} alt={file.name} className="w-20 h-20 object-cover rounded" />
-      {uploadProgress !== undefined && uploadProgress < 100 && (
-        <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-          <div className="text-white text-xs">{uploadProgress}%</div>
+    <div className="relative group rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 overflow-hidden">
+      {isImage ? (
+        <img src={preview} alt={file.name} className="w-20 h-20 object-cover" />
+      ) : (
+        <div className="w-44 h-20 px-3 flex items-center gap-2">
+          <FileText className="w-7 h-7 text-blue-500 flex-shrink-0" />
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-gray-800 dark:text-gray-100 truncate" title={file.name}>{file.name}</div>
+            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">{formatAttachmentSize(file.size)}</div>
+          </div>
         </div>
       )}
       {error && (
@@ -338,8 +501,10 @@ const ImageAttachment = ({ file, onRemove, uploadProgress, error }) => {
         </div>
       )}
       <button
+        type="button"
         onClick={onRemove}
-        className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 opacity-0 group-hover:opacity-100"
+        className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-1 opacity-80 hover:opacity-100"
+        aria-label="Remove attachment"
       >
         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -357,8 +522,11 @@ const ImageAttachment = ({ file, onRemove, uploadProgress, error }) => {
 // - onReplaceTemporarySession: Called to replace temporary session ID with real WebSocket session ID
 //
 // This ensures uninterrupted chat experience by pausing sidebar refreshes during conversations.
-function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, messages, onFileOpen, onInputFocusChange, onSessionActive, onSessionInactive, onReplaceTemporarySession, onNavigateToSession, onShowSettings, autoExpandTools, showRawParameters, autoScrollToBottom }) {
+function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, messages, onFileOpen, onInputFocusChange, onSessionActive, onSessionInactive, onReplaceTemporarySession, onNavigateToSession, onShowSettings, showRawParameters, autoScrollToBottom }) {
   const { t, language } = useLanguage();
+  const processedIndexStorageKey = `gemini_processed_index:${selectedProject?.name || 'none'}`;
+  const activeRunStorageKey = `gemini_active_run:${selectedProject?.name || 'none'}`;
+  const pendingSessionStorageKey = `pendingSessionId:${selectedProject?.name || 'none'}`;
   const [input, setInput] = useState(() => {
     if (typeof window !== 'undefined' && selectedProject) {
       return localStorage.getItem(`draft_input_${selectedProject.name}`) || '';
@@ -372,16 +540,16 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     }
     return [];
   });
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(() => !!sessionStorage.getItem(activeRunStorageKey));
   const [currentSessionId, setCurrentSessionId] = useState(null);
+  const [currentRunId, setCurrentRunId] = useState(() => sessionStorage.getItem(activeRunStorageKey));
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [sessionMessages, setSessionMessages] = useState([]);
   const [isLoadingSessionMessages, setIsLoadingSessionMessages] = useState(false);
   const [isSystemSessionChange, setIsSystemSessionChange] = useState(false);
   const [permissionMode, setPermissionMode] = useState('default');
-  const [attachedImages, setAttachedImages] = useState([]);
-  const [uploadingImages, setUploadingImages] = useState(new Map());
-  const [imageErrors, setImageErrors] = useState(new Map());
+  const [attachedFiles, setAttachedFiles] = useState([]);
+  const [attachmentErrors, setAttachmentErrors] = useState(new Map());
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const scrollContainerRef = useRef(null);
@@ -392,7 +560,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   const [selectedFileIndex, setSelectedFileIndex] = useState(-1);
   const [cursorPosition, setCursorPosition] = useState(0);
   const [atSymbolPosition, setAtSymbolPosition] = useState(-1);
-  const [canAbortSession, setCanAbortSession] = useState(false);
+  const [canAbortSession, setCanAbortSession] = useState(() => !!sessionStorage.getItem(activeRunStorageKey));
   const [isUserScrolledUp, setIsUserScrolledUp] = useState(false);
   const scrollPositionRef = useRef({ height: 0, top: 0 });
   const [showCommandMenu, setShowCommandMenu] = useState(false);
@@ -799,20 +967,32 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     };
   }, []);
 
-  const processedMessageIndexRef = useRef(0);
+  const processedMessageIndexRef = useRef(Number(sessionStorage.getItem(processedIndexStorageKey) || 0));
 
   useEffect(() => {
     // Handle all new WebSocket messages sequentially to prevent dropping batched deltas
     if (messages.length < processedMessageIndexRef.current) {
       processedMessageIndexRef.current = 0;
+      sessionStorage.setItem(processedIndexStorageKey, '0');
     }
 
     if (messages.length > processedMessageIndexRef.current) {
       const pendingMessages = messages.slice(processedMessageIndexRef.current);
       processedMessageIndexRef.current = messages.length;
+      sessionStorage.setItem(processedIndexStorageKey, String(messages.length));
 
       const processMessage = (latestMessage) => {
         if (!latestMessage) return;
+
+        if (isGeminiRuntimeMessage(latestMessage)) {
+          if (!messageBelongsToProject(latestMessage, selectedProject)) {
+            return;
+          }
+          if (latestMessage.runId) {
+            setCurrentRunId(latestMessage.runId);
+            sessionStorage.setItem(activeRunStorageKey, latestMessage.runId);
+          }
+        }
 
         switch (latestMessage.type) {
         case 'session-created':
@@ -822,13 +1002,13 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           }
           // Store it temporarily until conversation completes (prevents premature session association)
           if (latestMessage.sessionId && !currentSessionId) {
-            sessionStorage.setItem('pendingSessionId', latestMessage.sessionId);
+            sessionStorage.setItem(pendingSessionStorageKey, latestMessage.sessionId);
             
             // Session Protection: Replace temporary "new-session-*" identifier with real session ID
             // This maintains protection continuity - no gap between temp ID and real ID
             // The temporary session is removed and real session is marked as active
             if (onReplaceTemporarySession) {
-              onReplaceTemporarySession(latestMessage.sessionId);
+              onReplaceTemporarySession(selectedProject?.name, latestMessage.sessionId, latestMessage.runId || currentRunId);
             }
           }
           break;
@@ -1072,6 +1252,11 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           setIsLoading(false);
           setCanAbortSession(false);
           setGeminiStatus(null);
+          sessionStorage.removeItem(activeRunStorageKey);
+          if (onSessionInactive) {
+            onSessionInactive(selectedProject?.name, latestMessage.sessionId || currentSessionId, latestMessage.runId || currentRunId);
+          }
+          setCurrentRunId(null);
           break;
           
         case 'gemini-complete':
@@ -1086,17 +1271,19 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           // Session Protection: Mark session as inactive to re-enable automatic project updates
           // Conversation is complete, safe to allow project updates again
           // Use real session ID if available, otherwise use pending session ID
-          const activeSessionId = currentSessionId || sessionStorage.getItem('pendingSessionId');
-          if (activeSessionId && onSessionInactive) {
-            onSessionInactive(activeSessionId);
+          const activeSessionId = currentSessionId || sessionStorage.getItem(pendingSessionStorageKey);
+          if (onSessionInactive) {
+            onSessionInactive(selectedProject?.name, latestMessage.sessionId || activeSessionId, latestMessage.runId || currentRunId);
           }
           
           // If we have a pending session ID and the conversation completed successfully, use it
-          const pendingSessionId = sessionStorage.getItem('pendingSessionId');
+          const pendingSessionId = sessionStorage.getItem(pendingSessionStorageKey);
           if (pendingSessionId && !currentSessionId && latestMessage.exitCode === 0) {
                 setCurrentSessionId(pendingSessionId);
-            sessionStorage.removeItem('pendingSessionId');
+            sessionStorage.removeItem(pendingSessionStorageKey);
           }
+          sessionStorage.removeItem(activeRunStorageKey);
+          setCurrentRunId(null);
           
           // Clear persisted chat messages after successful completion
           if (selectedProject && latestMessage.exitCode === 0) {
@@ -1119,9 +1306,11 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
 
           // Session Protection: Mark session as inactive when aborted
           // User or system aborted the conversation, re-enable project updates
-          if (currentSessionId && onSessionInactive) {
-            onSessionInactive(currentSessionId);
+          if (onSessionInactive) {
+            onSessionInactive(selectedProject?.name, latestMessage.sessionId || currentSessionId, latestMessage.runId || currentRunId);
           }
+          sessionStorage.removeItem(activeRunStorageKey);
+          setCurrentRunId(null);
 
           setChatMessages(prev => [...prev, {
             type: 'assistant',
@@ -1263,6 +1452,12 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     return chatMessages.slice(-visibleMessageCount);
   }, [chatMessages, visibleMessageCount]);
 
+  // Group only for presentation. Streaming/tool-result updates continue to
+  // operate on the original flat chatMessages array.
+  const displayMessages = useMemo(() => {
+    return groupMessagesForDisplay(visibleMessages, isLoading);
+  }, [visibleMessages, isLoading]);
+
   // Capture scroll position before render when auto-scroll is disabled
   useEffect(() => {
     if (!autoScrollToBottom && scrollContainerRef.current) {
@@ -1367,69 +1562,86 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     setVisibleMessageCount(prevCount => prevCount + 100);
   }, []);
 
-  // Handle image files from drag & drop or file picker
-  const handleImageFiles = useCallback((files) => {
-    const validFiles = files.filter(file => {
-      if (!file.type.startsWith('image/')) {
-        return false;
-      }
-      if (file.size > 5 * 1024 * 1024) {
-        setImageErrors(prev => new Map(prev).set(file.name, 'File too large (max 5MB)'));
-        return false;
-      }
-      return true;
-    });
+  // Handle files from drag & drop, file picker, or clipboard.
+  const handleAttachmentFiles = useCallback((files) => {
+    const validFiles = [];
+    const errors = new Map();
 
+    for (const file of files) {
+      const image = isImageAttachment(file);
+      const maxSize = image ? 5 * 1024 * 1024 : 20 * 1024 * 1024;
+      if (file.size > maxSize) {
+        errors.set(
+          file.name,
+          language === 'zh'
+            ? `${file.name} 超过大小限制（${image ? '图片最大 5 MB' : '文件最大 20 MB'}）`
+            : `${file.name} exceeds the size limit (${image ? '5 MB for images' : '20 MB for files'})`
+        );
+        continue;
+      }
+      validFiles.push(file);
+    }
+
+    setAttachmentErrors(errors);
     if (validFiles.length > 0) {
-      setAttachedImages(prev => [...prev, ...validFiles].slice(0, 5)); // Max 5 images
-    }
-  }, []);
-
-  // Handle clipboard paste for images
-  const handlePaste = useCallback(async (e) => {
-    const items = Array.from(e.clipboardData.items);
-    
-    for (const item of items) {
-      if (item.type.startsWith('image/')) {
-        const file = item.getAsFile();
-        if (file) {
-          handleImageFiles([file]);
+      setAttachedFiles(prev => {
+        const remaining = Math.max(0, 10 - prev.length);
+        if (validFiles.length > remaining) {
+          setAttachmentErrors(current => new Map(current).set(
+            '__limit__',
+            language === 'zh' ? '一次最多上传 10 个附件' : 'You can upload up to 10 attachments at a time'
+          ));
         }
-      }
+        return [...prev, ...validFiles.slice(0, remaining)];
+      });
     }
-    
-    // Fallback for some browsers/platforms
-    if (items.length === 0 && e.clipboardData.files.length > 0) {
-      const files = Array.from(e.clipboardData.files);
-      const imageFiles = files.filter(f => f.type.startsWith('image/'));
-      if (imageFiles.length > 0) {
-        handleImageFiles(imageFiles);
-      }
-    }
-  }, [handleImageFiles]);
+  }, [language]);
 
-  // Setup dropzone
+  // Handle clipboard file data. This covers screenshots and browsers that expose copied files.
+  const handlePaste = useCallback(async (e) => {
+    const clipboardFiles = Array.from(e.clipboardData.files || []);
+    if (clipboardFiles.length > 0) {
+      handleAttachmentFiles(clipboardFiles);
+      return;
+    }
+
+    const itemFiles = Array.from(e.clipboardData.items || [])
+      .map(item => item.kind === 'file' ? item.getAsFile() : null)
+      .filter(Boolean);
+    if (itemFiles.length > 0) {
+      handleAttachmentFiles(itemFiles);
+    }
+  }, [handleAttachmentFiles]);
+
+  // Setup dropzone for all file types. Per-type limits are enforced above and again on the server.
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
-    accept: {
-      'image/*': ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']
+    maxSize: 20 * 1024 * 1024,
+    maxFiles: 10,
+    onDrop: handleAttachmentFiles,
+    onDropRejected: () => {
+      setAttachmentErrors(prev => new Map(prev).set(
+        '__drop__',
+        language === 'zh' ? '部分附件超过数量或大小限制' : 'Some attachments exceed the count or size limit'
+      ));
     },
-    maxSize: 5 * 1024 * 1024, // 5MB
-    maxFiles: 5,
-    onDrop: handleImageFiles,
-    noClick: true, // We'll use our own button
+    noClick: true,
     noKeyboard: true
   });
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!input.trim() || isLoading || !selectedProject) return;
+    if ((!input.trim() && attachedFiles.length === 0) || isLoading || !selectedProject) return;
 
-    // Upload images first if any
-    let uploadedImages = [];
-    if (attachedImages.length > 0) {
+    const commandText = input.trim() || (language === 'zh'
+      ? '请查看并分析这些附件。'
+      : 'Please review and analyze these attachments.');
+
+    // Upload attachments first. The backend stores them persistently inside the project.
+    let uploadedAttachments = [];
+    if (attachedFiles.length > 0) {
       const formData = new FormData();
-      attachedImages.forEach(file => {
-        formData.append('images', file);
+      attachedFiles.forEach(file => {
+        formData.append('attachments', file);
       });
       
       try {
@@ -1439,37 +1651,42 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           headers['Authorization'] = `Bearer ${token}`;
         }
         
-        const response = await fetch(`/api/projects/${selectedProject.name}/upload-images`, {
+        const response = await fetch(`/api/projects/${selectedProject.name}/upload-attachments`, {
           method: 'POST',
           headers: headers,
           body: formData
         });
         
         if (!response.ok) {
-          throw new Error('Failed to upload images');
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.error || 'Failed to upload attachments');
         }
         
         const result = await response.json();
-        uploadedImages = result.images;
+        uploadedAttachments = result.attachments || [];
       } catch (error) {
-        // console.error('Image upload failed:', error);
         setChatMessages(prev => [...prev, {
           type: 'error',
-          content: `Failed to upload images: ${error.message}`,
+          content: `${language === 'zh' ? '附件上传失败' : 'Failed to upload attachments'}: ${error.message}`,
           timestamp: new Date()
         }]);
         return;
       }
     }
 
+    const runId = globalThis.crypto?.randomUUID?.() || `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const userMessage = {
+      id: `user-${runId}`,
+      runId,
       type: 'user',
       content: input,
-      images: uploadedImages,
+      attachments: uploadedAttachments,
       timestamp: new Date()
     };
 
     setChatMessages(prev => [...prev, userMessage]);
+    setCurrentRunId(runId);
+    sessionStorage.setItem(activeRunStorageKey, runId);
     // console.log('Setting isLoading to true after sending message');
     setIsLoading(true);
     setCanAbortSession(true);
@@ -1487,23 +1704,25 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     // Session Protection: Mark session as active to prevent automatic project updates during conversation
     // This is crucial for maintaining chat state integrity. We handle two cases:
     // 1. Existing sessions: Use the real currentSessionId
-    // 2. New sessions: Generate temporary identifier "new-session-{timestamp}" since real ID comes via WebSocket later
+    // 2. New sessions: Use this project's stable run ID until Gemini reports the real session ID
     // This ensures no gap in protection between message send and session creation
-    const sessionToActivate = currentSessionId || `new-session-${Date.now()}`;
+    const sessionToActivate = currentSessionId || `run:${runId}`;
     if (onSessionActive) {
-      onSessionActive(sessionToActivate);
+      onSessionActive(selectedProject.name, sessionToActivate);
     }
 
-    // Send command to Gemini CLI via WebSocket with images
+    // Send command to Gemini CLI via WebSocket with persistent attachment metadata.
     const sent = sendMessage({
       type: 'gemini-command',
-      command: input,
+      command: commandText,
       options: {
+        runId,
+        projectName: selectedProject.name,
         projectPath: selectedProject.path,
         cwd: selectedProject.path,
         sessionId: currentSessionId,
         resume: !!currentSessionId,
-        images: uploadedImages // Pass images to backend
+        attachments: uploadedAttachments.map(({ data, ...attachment }) => attachment)
       }
     });
 
@@ -1511,6 +1730,11 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
       setIsLoading(false);
       setCanAbortSession(false);
       setGeminiStatus(null);
+      sessionStorage.removeItem(activeRunStorageKey);
+      setCurrentRunId(null);
+      if (onSessionInactive) {
+        onSessionInactive(selectedProject.name, currentSessionId, runId);
+      }
       setChatMessages(prev => [...prev, {
         type: 'error',
         content: language === 'zh' ? '网络连接尚未就绪，请等待连接建立后重试' : 'WebSocket connection is not ready. Please wait and try again.',
@@ -1520,9 +1744,8 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     }
 
     setInput('');
-    setAttachedImages([]);
-    setUploadingImages(new Map());
-    setImageErrors(new Map());
+    setAttachedFiles([]);
+    setAttachmentErrors(new Map());
     setIsTextareaExpanded(false);
     
     // Reset textarea height
@@ -1679,7 +1902,10 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     // 3. Send abort event to backend
     sendMessage({
       type: 'abort-session',
-      sessionId: currentSessionId || selectedSession?.id
+      sessionId: currentSessionId || selectedSession?.id,
+      runId: currentRunId,
+      projectName: selectedProject?.name,
+      projectPath: selectedProject?.path
     });
   };
 
@@ -1755,46 +1981,37 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
               </div>
             )}
             
-            {visibleMessages.map((message, index) => {
-              const prevMessage = index > 0 ? visibleMessages[index - 1] : null;
-              
+            {displayMessages.map((displayItem, index) => {
+              if (displayItem.kind === 'assistant-group') {
+                return (
+                  <AssistantMessageGroup
+                    key={displayItem.id}
+                    group={displayItem}
+                    createDiff={createDiff}
+                    onFileOpen={onFileOpen}
+                    onShowSettings={onShowSettings}
+                    showRawParameters={showRawParameters}
+                    statusText={statusText}
+                    elapsedTime={elapsedTime}
+                  />
+                );
+              }
+
+              const message = displayItem.message;
               return (
                 <MessageComponent
-                  key={`${message.id || index}-${message.timestamp}`}
+                  key={displayItem.id}
                   message={message}
                   index={index}
-                  prevMessage={prevMessage}
+                  prevMessage={null}
                   createDiff={createDiff}
                   onFileOpen={onFileOpen}
                   onShowSettings={onShowSettings}
-                  autoExpandTools={autoExpandTools}
                   showRawParameters={showRawParameters}
                 />
               );
             })}
           </>
-        )}
-        
-        {isLoading && (
-          <div className="chat-message assistant">
-            <div className="w-full">
-              <div className="flex items-center space-x-3 mb-2">
-                <div className="w-8 h-8 bg-gray-600 rounded-full flex items-center justify-center text-white text-sm flex-shrink-0">
-                  G
-                </div>
-                <div className="text-sm font-medium text-gray-900 dark:text-white">Gemini</div>
-                {/* Abort button removed - functionality not yet implemented at backend */}
-              </div>
-              <div className="w-full text-sm text-gray-500 dark:text-gray-400 pl-3 sm:pl-0">
-                <div className="flex items-center space-x-1">
-                  <div className="animate-pulse">●</div>
-                  <div className="animate-pulse" style={{ animationDelay: '0.2s' }}>●</div>
-                  <div className="animate-pulse" style={{ animationDelay: '0.4s' }}>●</div>
-                  <span className="ml-2">{t('chat.thinking')}...</span>
-                </div>
-              </div>
-            </div>
-          </div>
         )}
         
         <div ref={messagesEndRef} />
@@ -1858,27 +2075,33 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
                 <svg className="w-8 h-8 text-blue-500 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                 </svg>
-                <p className="text-sm font-medium">{t('chat.dropImagesHere')}</p>
+                <p className="text-sm font-medium">{t('chat.dropFilesHere')}</p>
               </div>
             </div>
           )}
           
-          {/* Image attachments preview */}
-          {attachedImages.length > 0 && (
+          {/* Attachment previews */}
+          {attachedFiles.length > 0 && (
             <div className="mb-2 p-2 bg-gray-50 dark:bg-gray-800 rounded-lg">
               <div className="flex flex-wrap gap-2">
-                {attachedImages.map((file, index) => (
-                  <ImageAttachment
-                    key={index}
+                {attachedFiles.map((file, index) => (
+                  <AttachmentPreview
+                    key={`${file.name}-${file.lastModified}-${index}`}
                     file={file}
                     onRemove={() => {
-                      setAttachedImages(prev => prev.filter((_, i) => i !== index));
+                      setAttachedFiles(prev => prev.filter((_, i) => i !== index));
                     }}
-                    uploadProgress={uploadingImages.get(file.name)}
-                    error={imageErrors.get(file.name)}
+                    error={attachmentErrors.get(file.name)}
                   />
                 ))}
               </div>
+            </div>
+          )}
+          {attachmentErrors.size > 0 && (
+            <div className="mb-2 space-y-1">
+              {Array.from(new Set(attachmentErrors.values())).slice(0, 3).map((error, index) => (
+                <div key={`${error}-${index}`} className="text-xs text-red-600 dark:text-red-400">{error}</div>
+              ))}
             </div>
           )}
           
@@ -1996,7 +2219,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
                 </svg>
               </button>
             )}
-            {/* Image upload button */}
+            {/* File / image upload button */}
             <button
               type="button"
               onClick={open}
@@ -2004,11 +2227,9 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
               className={`absolute left-2 bottom-3 sm:bottom-4 p-2 rounded-lg transition-colors ${
                 isLoading ? 'opacity-40 cursor-not-allowed' : 'hover:bg-gray-100 dark:hover:bg-gray-700'
               }`}
-              title={t('chat.uploadImages')}
+              title={t('chat.uploadFiles')}
             >
-              <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-              </svg>
+              <Paperclip className="w-5 h-5 text-gray-500" />
             </button>
             
             {/* Mic button - HIDDEN */}

@@ -3,8 +3,7 @@ import { ScrollArea } from './ui/scroll-area';
 import { Button } from './ui/button';
 import { Folder, FolderOpen, File, FileText, FileCode, List, TableProperties, Eye, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
 import { cn } from '../lib/utils';
-import CodeEditor from './CodeEditor';
-import ImageViewer from './ImageViewer';
+import FileViewer from './FileViewer';
 import { api } from '../utils/api';
 import { useLanguage } from '../contexts/LanguageContext';
 
@@ -15,7 +14,6 @@ function FileTree({ selectedProject }) {
   const [lastRefresh, setLastRefresh] = useState(Date.now());
   const [expandedDirs, setExpandedDirs] = useState(new Set());
   const [selectedFile, setSelectedFile] = useState(null);
-  const [selectedImage, setSelectedImage] = useState(null);
   const [viewMode, setViewMode] = useState('detailed'); // 'simple', 'detailed', 'compact'
 
   useEffect(() => {
@@ -119,16 +117,7 @@ function FileTree({ selectedProject }) {
           onClick={() => {
             if (item.type === 'directory') {
               toggleDirectory(item.path);
-            } else if (isImageFile(item.name)) {
-              // Open image in viewer
-              setSelectedImage({
-                name: item.name,
-                path: item.path,
-                projectPath: selectedProject.path,
-                projectName: selectedProject.name
-              });
             } else {
-              // Open file in editor
               setSelectedFile({
                 name: item.name,
                 path: item.path,
@@ -183,12 +172,6 @@ function FileTree({ selectedProject }) {
     ));
   };
 
-  const isImageFile = (filename) => {
-    const ext = filename.split('.').pop()?.toLowerCase();
-    const imageExtensions = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp'];
-    return imageExtensions.includes(ext);
-  };
-
   const getFileIcon = (filename) => {
     const ext = filename.split('.').pop()?.toLowerCase();
     
@@ -219,13 +202,6 @@ function FileTree({ selectedProject }) {
           onClick={() => {
             if (item.type === 'directory') {
               toggleDirectory(item.path);
-            } else if (isImageFile(item.name)) {
-              setSelectedImage({
-                name: item.name,
-                path: item.path,
-                projectPath: selectedProject.path,
-                projectName: selectedProject.name
-              });
             } else {
               setSelectedFile({
                 name: item.name,
@@ -302,13 +278,6 @@ function FileTree({ selectedProject }) {
           onClick={() => {
             if (item.type === 'directory') {
               toggleDirectory(item.path);
-            } else if (isImageFile(item.name)) {
-              setSelectedImage({
-                name: item.name,
-                path: item.path,
-                projectPath: selectedProject.path,
-                projectName: selectedProject.name
-              });
             } else {
               setSelectedFile({
                 name: item.name,
@@ -461,20 +430,12 @@ function FileTree({ selectedProject }) {
         )}
       </ScrollArea>
       
-      {/* Code Editor Modal */}
+      {/* Unified File Viewer Modal */}
       {selectedFile && (
-        <CodeEditor
+        <FileViewer
           file={selectedFile}
           onClose={() => setSelectedFile(null)}
           projectPath={selectedFile.projectPath}
-        />
-      )}
-      
-      {/* Image Viewer Modal */}
-      {selectedImage && (
-        <ImageViewer
-          file={selectedImage}
-          onClose={() => setSelectedImage(null)}
         />
       )}
     </div>

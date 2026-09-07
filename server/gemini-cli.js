@@ -9,7 +9,7 @@ let activeGeminiProcesses = new Map(); // Track active processes by session ID
 
 async function spawnGemini(command, options = {}, ws) {
   return new Promise(async (resolve, reject) => {
-    const { sessionId, projectPath, cwd, resume, images } = options;
+    const { sessionId, projectPath, cwd, resume, images, attachments, runId } = options;
     let capturedSessionId = sessionId; // Track session ID throughout the process
     let sessionCreatedSent = false; // Track if we've already sent session-created event
     let fullResponse = ''; // Accumulate the full response
@@ -39,56 +39,62 @@ async function spawnGemini(command, options = {}, ws) {
     const workingDir = cleanPath;
     // Debug - workingDir
     
-    // Handle images by saving them to temporary files and passing paths to Gemini
-    const tempImagePaths = [];
-    let tempDir = null;
-    if (images && images.length > 0) {
-      try {
-        // Create temp directory in the project directory so Gemini can access it
-        tempDir = path.join(workingDir, '.tmp', 'images', Date.now().toString());
-        await fs.mkdir(tempDir, { recursive: true });
-        
-        // Save each image to a temp file
-        for (const [index, image] of images.entries()) {
-          // Extract base64 data and mime type
-          const matches = image.data.match(/^data:([^;]+);base64,(.+)$/);
-          if (!matches) {
-            // console.error('Invalid image data format');
-            continue;
-          }
-          
-          const [, mimeType, base64Data] = matches;
-          const extension = mimeType.split('/')[1] || 'png';
-          const filename = `image_${index}.${extension}`;
-          const filepath = path.join(tempDir, filename);
-          
-          // Write base64 data to file
-          await fs.writeFile(filepath, Buffer.from(base64Data, 'base64'));
-          tempImagePaths.push(filepath);
+    // Collect persistent attachment paths. New clients upload files before the
+    // WebSocket command, so Gemini can read the files directly without another copy.
+    const attachmentPaths = [];
+    if (Array.isArray(attachments)) {
+      for (const attachment of attachments) {
+        if (!attachment?.path) continue;
+        try {
+          const resolvedPath = path.resolve(attachment.path);
+          const relativePath = path.relative(path.resolve(workingDir), resolvedPath);
+          if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) continue;
+          const stat = await fs.stat(resolvedPath);
+          if (stat.isFile()) attachmentPaths.push(resolvedPath);
+        } catch (error) {
+          // Ignore missing or invalid attachment paths.
         }
-        
-        // Include the full image paths in the prompt for Gemini to reference
-        // Gemini CLI can read images from file paths in the prompt
-        if (tempImagePaths.length > 0 && command && command.trim()) {
-          const imageNote = `\n\n[画像を添付しました: ${tempImagePaths.length}枚の画像があります。以下のパスに保存されています:]\n${tempImagePaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
-          const modifiedCommand = command + imageNote;
-          
-          // Update the command in args
-          const promptIndex = args.indexOf('--prompt');
-          if (promptIndex !== -1 && args[promptIndex + 1] === command) {
-            args[promptIndex + 1] = modifiedCommand;
-          } else if (promptIndex !== -1) {
-            // If we're using context, update the full prompt
-            args[promptIndex + 1] = args[promptIndex + 1] + imageNote;
-          }
-        }
-        
-        
-      } catch (error) {
-        // console.error('Error processing images for Gemini:', error);
       }
     }
-    
+
+    // Backward compatibility for old clients that still send base64 images.
+    // Persist those images in the project too, and intentionally never delete them.
+    if (images && images.length > 0) {
+      try {
+        const persistentDir = path.join(
+          workingDir,
+          '.gemini-cli-ui',
+          'uploads',
+          `legacy-${Date.now()}-${Math.round(Math.random() * 1e9)}`
+        );
+        await fs.mkdir(persistentDir, { recursive: true });
+
+        for (const [index, image] of images.entries()) {
+          const matches = image.data?.match(/^data:([^;]+);base64,(.+)$/);
+          if (!matches) continue;
+
+          const [, mimeType, base64Data] = matches;
+          const extension = (mimeType.split('/')[1] || 'png').replace(/[^a-zA-Z0-9]/g, '');
+          const filepath = path.join(persistentDir, `image_${index}.${extension}`);
+          await fs.writeFile(filepath, Buffer.from(base64Data, 'base64'));
+          attachmentPaths.push(filepath);
+        }
+      } catch (error) {
+        // Keep the main task available even if a legacy image cannot be persisted.
+      }
+    }
+
+    if (attachmentPaths.length > 0 && command && command.trim()) {
+      const attachmentNote = `
+
+[Attached files are persisted in this project. Read them from these paths:]
+${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
+      const promptIndex = args.indexOf('--prompt');
+      if (promptIndex !== -1) {
+        args[promptIndex + 1] = `${args[promptIndex + 1]}${attachmentNote}`;
+      }
+    }
+
     // Add basic flags for Gemini
     // Only add debug flag if explicitly requested
     if (options.debug) {
@@ -180,16 +186,15 @@ async function spawnGemini(command, options = {}, ws) {
       env: { ...process.env } // Inherit all environment variables
     });
     
-    // Attach temp file info to process for cleanup later
-    geminiProcess.tempImagePaths = tempImagePaths;
-    geminiProcess.tempDir = tempDir;
-    
-    // Store process reference for potential abort
-    const processKey = capturedSessionId || sessionId || Date.now().toString();
+    // Prefer the client-generated run ID. Session IDs can be unavailable until
+    // Gemini emits init, while runId is stable from the moment the task starts.
+    const processKey = runId || capturedSessionId || sessionId || Date.now().toString();
     activeGeminiProcesses.set(processKey, geminiProcess);
     
     // Store sessionId on the process object for debugging
     geminiProcess.sessionId = processKey;
+    geminiProcess.runId = runId || null;
+    geminiProcess.capturedSessionId = capturedSessionId || sessionId || null;
     
     // Close stdin to signal we're done sending input
     geminiProcess.stdin.end();
@@ -244,6 +249,7 @@ async function spawnGemini(command, options = {}, ws) {
           if (event.type === 'init') {
             if (event.session_id) {
               capturedSessionId = event.session_id;
+              geminiProcess.capturedSessionId = capturedSessionId;
               if (!sessionCreatedSent) {
                 sessionCreatedSent = true;
                 
@@ -257,7 +263,9 @@ async function spawnGemini(command, options = {}, ws) {
                   sessionManager.addMessage(capturedSessionId, 'user', command);
                 }
                 
-                if (processKey !== capturedSessionId) {
+                // Legacy clients without runId are re-keyed to the real session.
+                // New clients keep the stable runId key for exact cancellation.
+                if (!runId && processKey !== capturedSessionId) {
                   activeGeminiProcesses.delete(processKey);
                   activeGeminiProcesses.set(capturedSessionId, geminiProcess);
                 }
@@ -356,7 +364,10 @@ async function spawnGemini(command, options = {}, ws) {
       
       // Clean up process reference
       const finalSessionId = capturedSessionId || sessionId || processKey;
-      activeGeminiProcesses.delete(finalSessionId);
+      activeGeminiProcesses.delete(processKey);
+      if (finalSessionId !== processKey) {
+        activeGeminiProcesses.delete(finalSessionId);
+      }
       
       // Save assistant response to session if we have one
       if (finalSessionId && fullResponse) {
@@ -377,20 +388,6 @@ async function spawnGemini(command, options = {}, ws) {
         isNewSession: !sessionId && !!command // Flag to indicate this was a new session
       }));
       
-      // Clean up temporary image files if any
-      if (geminiProcess.tempImagePaths && geminiProcess.tempImagePaths.length > 0) {
-        for (const imagePath of geminiProcess.tempImagePaths) {
-          await fs.unlink(imagePath).catch(err => {
-            // console.error(`Failed to delete temp image ${imagePath}:`, err)
-          });
-        }
-        if (geminiProcess.tempDir) {
-          await fs.rm(geminiProcess.tempDir, { recursive: true, force: true }).catch(err => {
-            // console.error(`Failed to delete temp directory ${geminiProcess.tempDir}:`, err)
-          });
-        }
-      }
-      
       if (code === 0) {
         resolve();
       } else {
@@ -404,7 +401,10 @@ async function spawnGemini(command, options = {}, ws) {
       
       // Clean up process reference on error
       const finalSessionId = capturedSessionId || sessionId || processKey;
-      activeGeminiProcesses.delete(finalSessionId);
+      activeGeminiProcesses.delete(processKey);
+      if (finalSessionId !== processKey) {
+        activeGeminiProcesses.delete(finalSessionId);
+      }
       
       ws.send(JSON.stringify({
         type: 'gemini-error',
@@ -426,19 +426,24 @@ async function spawnGemini(command, options = {}, ws) {
   });
 }
 
-function abortGeminiSession(sessionId) {
-  console.log('🛑 abortGeminiSession called with sessionId:', sessionId, 'active count:', activeGeminiProcesses.size);
+function abortGeminiSession(sessionId, runId = null) {
+  console.log('🛑 abortGeminiSession called with sessionId:', sessionId, 'runId:', runId, 'active count:', activeGeminiProcesses.size);
 
   let processToKill = null;
   let processKey = null;
 
-  if (sessionId) {
+  if (runId) {
+    processToKill = activeGeminiProcesses.get(runId);
+    processKey = runId;
+  }
+
+  if (!processToKill && sessionId) {
     processToKill = activeGeminiProcesses.get(sessionId);
     processKey = sessionId;
 
     if (!processToKill) {
       for (const [key, proc] of activeGeminiProcesses.entries()) {
-        if (key.includes(sessionId) || sessionId.includes(key)) {
+        if (proc.capturedSessionId === sessionId || key === sessionId) {
           processToKill = proc;
           processKey = key;
           break;
@@ -447,12 +452,12 @@ function abortGeminiSession(sessionId) {
     }
   }
 
-  // Fallback: If not found by ID or no ID provided, kill the active processes
-  if (!processToKill && activeGeminiProcesses.size > 0) {
-    const entries = Array.from(activeGeminiProcesses.entries());
-    const [lastKey, lastProc] = entries[entries.length - 1];
-    processToKill = lastProc;
-    processKey = lastKey;
+  // A legacy caller with no identifier is safe only when exactly one task is
+  // running. Never guess a process when multiple projects are active.
+  if (!processToKill && !runId && !sessionId && activeGeminiProcesses.size === 1) {
+    const [[onlyKey, onlyProcess]] = Array.from(activeGeminiProcesses.entries());
+    processToKill = onlyProcess;
+    processKey = onlyKey;
   }
 
   if (processToKill) {

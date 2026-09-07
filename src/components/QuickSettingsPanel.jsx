@@ -1,8 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  ChevronLeft, 
-  ChevronRight, 
-  Maximize2, 
   Eye, 
   Settings2,
   Moon,
@@ -21,8 +18,6 @@ import { useLanguage } from '../contexts/LanguageContext';
 const QuickSettingsPanel = ({ 
   isOpen, 
   onToggle,
-  autoExpandTools,
-  onAutoExpandChange,
   showRawParameters,
   onShowRawParametersChange,
   autoScrollToBottom,
@@ -48,25 +43,6 @@ const QuickSettingsPanel = ({
 
   return (
     <>
-      {/* Pull Tab */}
-      <div
-        className={`fixed ${isMobile ? 'bottom-44' : 'top-1/2 -translate-y-1/2'} ${
-          localIsOpen ? 'right-64' : 'right-0'
-        } z-50 transition-all duration-150 ease-out`}
-      >
-        <button
-          onClick={handleToggle}
-          className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-l-md p-2 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors shadow-lg"
-          aria-label={localIsOpen ? t('common.close') : t('quickSettings.title')}
-        >
-          {localIsOpen ? (
-            <ChevronRight className="h-5 w-5 text-gray-600 dark:text-gray-400" />
-          ) : (
-            <ChevronLeft className="h-5 w-5 text-gray-600 dark:text-gray-400" />
-          )}
-        </button>
-      </div>
-
       {/* Panel */}
       <div
         className={`fixed top-0 right-0 h-full w-64 bg-white dark:bg-gray-900 border-l border-gray-200 dark:border-gray-700 shadow-xl transform transition-transform duration-150 ease-out z-40 ${
@@ -129,19 +105,6 @@ const QuickSettingsPanel = ({
                 {t('quickSettings.toolDisplay')}
               </h4>
               
-              <label className="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer transition-colors border border-transparent hover:border-gray-300 dark:hover:border-gray-600">
-                <span className="flex items-center gap-2 text-sm text-gray-900 dark:text-white">
-                  <Maximize2 className="h-4 w-4 text-gray-600 dark:text-gray-400" />
-                  {t('quickSettings.autoExpandTools')}
-                </span>
-                <input
-                  type="checkbox"
-                  checked={autoExpandTools}
-                  onChange={(e) => onAutoExpandChange(e.target.checked)}
-                  className="h-4 w-4 rounded border-gray-300 dark:border-gray-600 text-blue-600 dark:text-blue-500 focus:ring-blue-500 dark:focus:ring-blue-400 dark:bg-gray-800 dark:checked:bg-blue-600"
-                />
-              </label>
-
               <label className="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer transition-colors border border-transparent hover:border-gray-300 dark:hover:border-gray-600">
                 <span className="flex items-center gap-2 text-sm text-gray-900 dark:text-white">
                   <Eye className="h-4 w-4 text-gray-600 dark:text-gray-400" />

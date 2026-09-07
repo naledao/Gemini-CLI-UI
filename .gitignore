@@ -22,6 +22,7 @@ out/
 # IDE and editor files
 .vscode/
 .idea/
+.coding-tools/
 *.swp
 *.swo
 *~

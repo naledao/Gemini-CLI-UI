@@ -462,6 +462,43 @@ async function buildFileTree(dirPath, maxDepth = 4, depth = 0) {
   }
 }
 
+async function resolveProjectFilePath(projectName, requestedPath) {
+  if (!requestedPath || typeof requestedPath !== 'string') {
+    const error = new Error('Invalid file path');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const projectPath = await extractProjectDirectory(projectName);
+  if (!projectPath) {
+    const error = new Error('Project not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const projectRoot = await fsPromises.realpath(path.resolve(projectPath));
+  const candidate = path.isAbsolute(requestedPath)
+    ? path.resolve(requestedPath)
+    : path.resolve(projectRoot, requestedPath);
+  const relativeCandidate = path.relative(projectRoot, candidate);
+
+  if (relativeCandidate.startsWith('..') || path.isAbsolute(relativeCandidate)) {
+    const error = new Error('File path is outside the selected project');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const realFile = await fsPromises.realpath(candidate);
+  const realRelative = path.relative(projectRoot, realFile);
+  if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
+    const error = new Error('File resolves outside the selected project');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return { projectRoot, filePath: realFile };
+}
+
 // Get project files tree endpoint
 app.get('/api/projects/:projectName/files', authenticateToken, async (req, res) => {
   try {
@@ -482,26 +519,46 @@ app.get('/api/projects/:projectName/file', authenticateToken, async (req, res) =
   try {
     const { projectName } = req.params;
     const { filePath } = req.query;
-    
-    // console.log('📄 File read request:', projectName, filePath);
-    
-    // Using fsPromises from import
-    
-    // Security check - ensure the path is safe and absolute
-    if (!filePath || !path.isAbsolute(filePath)) {
-      return res.status(400).json({ error: 'Invalid file path' });
+    const resolved = await resolveProjectFilePath(projectName, filePath);
+    const stat = await fsPromises.stat(resolved.filePath);
+
+    if (!stat.isFile()) {
+      return res.status(400).json({ error: 'Path is not a regular file' });
     }
-    
-    const content = await fsPromises.readFile(filePath, 'utf8');
-    res.json({ content, path: filePath });
+
+    const maxPreviewSize = 5 * 1024 * 1024;
+    if (stat.size > maxPreviewSize) {
+      return res.status(413).json({ error: 'File is too large to preview (maximum 5 MiB)' });
+    }
+
+    const handle = await fsPromises.open(resolved.filePath, 'r');
+    try {
+      const probeSize = Math.min(8192, stat.size);
+      if (probeSize > 0) {
+        const probe = Buffer.alloc(probeSize);
+        const { bytesRead } = await handle.read(probe, 0, probeSize, 0);
+        if (probe.subarray(0, bytesRead).includes(0)) {
+          return res.status(415).json({ error: 'Binary files cannot be previewed as text' });
+        }
+      }
+    } finally {
+      await handle.close();
+    }
+
+    const content = await fsPromises.readFile(resolved.filePath, 'utf8');
+    res.json({
+      content,
+      path: resolved.filePath,
+      size: stat.size,
+      mimeType: mime.lookup(resolved.filePath) || 'text/plain'
+    });
   } catch (error) {
-    // console.error('Error reading file:', error);
     if (error.code === 'ENOENT') {
       res.status(404).json({ error: 'File not found' });
     } else if (error.code === 'EACCES') {
       res.status(403).json({ error: 'Permission denied' });
     } else {
-      res.status(500).json({ error: error.message });
+      res.status(error.statusCode || 500).json({ error: error.message });
     }
   }
 });
@@ -511,43 +568,26 @@ app.get('/api/projects/:projectName/files/content', authenticateToken, async (re
   try {
     const { projectName } = req.params;
     const { path: filePath } = req.query;
-    
-    // console.log('🖼️ Binary file serve request:', projectName, filePath);
-    
-    // Using fs from import
-    // Using mime from import
-    
-    // Security check - ensure the path is safe and absolute
-    if (!filePath || !path.isAbsolute(filePath)) {
-      return res.status(400).json({ error: 'Invalid file path' });
+    const resolved = await resolveProjectFilePath(projectName, filePath);
+    const stat = await fsPromises.stat(resolved.filePath);
+
+    if (!stat.isFile()) {
+      return res.status(400).json({ error: 'Path is not a regular file' });
     }
-    
-    // Check if file exists
-    try {
-      await fsPromises.access(filePath);
-    } catch (error) {
-      return res.status(404).json({ error: 'File not found' });
-    }
-    
-    // Get file extension and set appropriate content type
-    const mimeType = mime.lookup(filePath) || 'application/octet-stream';
+
+    const mimeType = mime.lookup(resolved.filePath) || 'application/octet-stream';
     res.setHeader('Content-Type', mimeType);
-    
-    // Stream the file
-    const fileStream = fs.createReadStream(filePath);
+
+    const fileStream = fs.createReadStream(resolved.filePath);
     fileStream.pipe(res);
-    
     fileStream.on('error', (error) => {
-      // console.error('Error streaming file:', error);
       if (!res.headersSent) {
         res.status(500).json({ error: 'Error reading file' });
       }
     });
-    
   } catch (error) {
-    // console.error('Error serving binary file:', error);
     if (!res.headersSent) {
-      res.status(500).json({ error: error.message });
+      res.status(error.statusCode || (error.code === 'ENOENT' ? 404 : 500)).json({ error: error.message });
     }
   }
 });
@@ -557,45 +597,35 @@ app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) =
   try {
     const { projectName } = req.params;
     const { filePath, content } = req.body;
-    
-    // console.log('💾 File save request:', projectName, filePath);
-    
-    // Using fsPromises from import
-    
-    // Security check - ensure the path is safe and absolute
-    if (!filePath || !path.isAbsolute(filePath)) {
-      return res.status(400).json({ error: 'Invalid file path' });
-    }
-    
+    const resolved = await resolveProjectFilePath(projectName, filePath);
+
     if (content === undefined) {
       return res.status(400).json({ error: 'Content is required' });
     }
-    
-    // Create backup of original file
-    try {
-      const backupPath = filePath + '.backup.' + Date.now();
-      await fsPromises.copyFile(filePath, backupPath);
-      // console.log('📋 Created backup:', backupPath);
-    } catch (backupError) {
-      // console.warn('Could not create backup:', backupError.message);
+    if (typeof content !== 'string') {
+      return res.status(400).json({ error: 'Content must be text' });
     }
-    
-    // Write the new content
-    await fsPromises.writeFile(filePath, content, 'utf8');
-    
-    res.json({ 
-      success: true, 
-      path: filePath,
-      message: 'File saved successfully' 
+
+    try {
+      const backupPath = resolved.filePath + '.backup.' + Date.now();
+      await fsPromises.copyFile(resolved.filePath, backupPath);
+    } catch (backupError) {
+      // Best effort backup; saving remains available if a backup cannot be created.
+    }
+
+    await fsPromises.writeFile(resolved.filePath, content, 'utf8');
+    res.json({
+      success: true,
+      path: resolved.filePath,
+      message: 'File saved successfully'
     });
   } catch (error) {
-    // console.error('Error saving file:', error);
     if (error.code === 'ENOENT') {
       res.status(404).json({ error: 'File or directory not found' });
     } else if (error.code === 'EACCES') {
       res.status(403).json({ error: 'Permission denied' });
     } else {
-      res.status(500).json({ error: error.message });
+      res.status(error.statusCode || 500).json({ error: error.message });
     }
   }
 });
@@ -740,13 +770,59 @@ function handleChatConnection(ws) {
         console.log('📁 Project:', data.options?.projectPath || 'Unknown');
         console.log('📂 cwd:', data.options?.cwd || 'Unknown');
         console.log('🔄 Session:', data.options?.sessionId ? 'Resume' : 'New');
-        await spawnGemini(data.command, data.options, ws);
+        const runId = data.options?.runId || `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const projectName = data.options?.projectName || null;
+        const projectPath = data.options?.projectPath || data.options?.cwd || null;
+        let scopedSessionId = data.options?.sessionId || null;
+
+        // Multiple projects can run Gemini concurrently on the same browser
+        // WebSocket. Tag every runtime event so the client can route it to the
+        // project/run that created it instead of leaking it into the active UI.
+        const scopedWs = {
+          send: (payload) => {
+            let event;
+            try {
+              event = typeof payload === 'string' ? JSON.parse(payload) : payload;
+            } catch {
+              event = { type: 'gemini-output', data: String(payload) };
+            }
+
+            if (event?.sessionId) {
+              scopedSessionId = event.sessionId;
+            }
+
+            if (ws.readyState === ws.OPEN) {
+              ws.send(JSON.stringify({
+                ...event,
+                runId,
+                projectName,
+                projectPath,
+                sessionId: event?.sessionId || scopedSessionId || null
+              }));
+            }
+          }
+        };
+
+        try {
+          await spawnGemini(data.command, { ...data.options, runId }, scopedWs);
+        } catch (error) {
+          // spawnGemini already emits detailed runtime errors when available.
+          // This scoped fallback prevents an execution failure from becoming an
+          // unowned global event that another project's UI could consume.
+          scopedWs.send(JSON.stringify({
+            type: 'gemini-error',
+            error: error.message
+          }));
+        }
       } else if (data.type === 'abort-session') {
-        console.log('🛑 Abort session request:', data.sessionId);
-        const success = abortGeminiSession(data.sessionId);
+        console.log('🛑 Abort session request:', data.sessionId, 'run:', data.runId);
+        const success = abortGeminiSession(data.sessionId, data.runId);
         ws.send(JSON.stringify({
           type: 'session-aborted',
           sessionId: data.sessionId,
+          runId: data.runId || null,
+          projectName: data.projectName || null,
+          projectPath: data.projectPath || null,
           success
         }));
       }
@@ -914,88 +990,94 @@ Agent instructions:`;
   }
 });
 
-// Image upload endpoint
-app.post('/api/projects/:projectName/upload-images', authenticateToken, async (req, res) => {
+// Persistent attachment upload endpoint. Files are kept under the selected
+// project so resumed Gemini sessions can continue to reference them later.
+// The legacy /upload-images path is kept for older clients.
+app.post(['/api/projects/:projectName/upload-attachments', '/api/projects/:projectName/upload-images'], authenticateToken, async (req, res) => {
   try {
     const multer = (await import('multer')).default;
-    const path = (await import('path')).default;
-    const fs = (await import('fs')).promises;
-    const os = (await import('os')).default;
-    
-    // Configure multer for image uploads
+    const projectPath = await extractProjectDirectory(req.params.projectName);
+    if (!projectPath) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+
+    const projectRoot = await fsPromises.realpath(path.resolve(projectPath));
+    const batchId = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    const uploadDir = path.join(projectRoot, '.gemini-cli-ui', 'uploads', batchId);
+    await fsPromises.mkdir(uploadDir, { recursive: true });
+
     const storage = multer.diskStorage({
-      destination: async (req, file, cb) => {
-        const uploadDir = path.join(os.tmpdir(), 'gemini-ui-uploads', String(req.user.id));
-        await fs.mkdir(uploadDir, { recursive: true });
-        cb(null, uploadDir);
-      },
+      destination: (req, file, cb) => cb(null, uploadDir),
       filename: (req, file, cb) => {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
+        const sanitizedName = path.basename(file.originalname).replace(/[^a-zA-Z0-9._-]/g, '_') || 'attachment';
         cb(null, uniqueSuffix + '-' + sanitizedName);
       }
     });
-    
-    const fileFilter = (req, file, cb) => {
-      const allowedMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
-      if (allowedMimes.includes(file.mimetype)) {
-        cb(null, true);
-      } else {
-        cb(new Error('Invalid file type. Only JPEG, PNG, GIF, WebP, and SVG are allowed.'));
-      }
-    };
-    
+
     const upload = multer({
       storage,
-      fileFilter,
       limits: {
-        fileSize: 5 * 1024 * 1024, // 5MB
-        files: 5
+        fileSize: 20 * 1024 * 1024,
+        files: 10
       }
     });
-    
-    // Handle multipart form data
-    upload.array('images', 5)(req, res, async (err) => {
+
+    upload.fields([
+      { name: 'attachments', maxCount: 10 },
+      { name: 'images', maxCount: 10 }
+    ])(req, res, async (err) => {
       if (err) {
+        await fsPromises.rm(uploadDir, { recursive: true, force: true }).catch(() => {});
         return res.status(400).json({ error: err.message });
       }
-      
-      if (!req.files || req.files.length === 0) {
-        return res.status(400).json({ error: 'No image files provided' });
+
+      const uploadedFiles = [
+        ...((req.files && req.files.attachments) || []),
+        ...((req.files && req.files.images) || [])
+      ];
+
+      if (uploadedFiles.length === 0) {
+        await fsPromises.rm(uploadDir, { recursive: true, force: true }).catch(() => {});
+        return res.status(400).json({ error: 'No attachment files provided' });
       }
-      
+
       try {
-        // Process uploaded images
-        const processedImages = await Promise.all(
-          req.files.map(async (file) => {
-            // Read file and convert to base64
-            const buffer = await fs.readFile(file.path);
-            const base64 = buffer.toString('base64');
-            const mimeType = file.mimetype;
-            
-            // Clean up temp file immediately
-            await fs.unlink(file.path);
-            
-            return {
-              name: file.originalname,
-              data: `data:${mimeType};base64,${base64}`,
-              size: file.size,
-              mimeType: mimeType
-            };
-          })
-        );
-        
-        res.json({ images: processedImages });
+        const oversizedImage = uploadedFiles.find(file => file.mimetype?.startsWith('image/') && file.size > 5 * 1024 * 1024);
+        if (oversizedImage) {
+          await fsPromises.rm(uploadDir, { recursive: true, force: true }).catch(() => {});
+          return res.status(400).json({ error: `Image ${oversizedImage.originalname} exceeds the 5 MiB limit` });
+        }
+
+        const attachments = await Promise.all(uploadedFiles.map(async (file) => {
+          const isImage = file.mimetype?.startsWith('image/') || false;
+          const attachment = {
+            name: file.originalname,
+            path: file.path,
+            relativePath: path.relative(projectRoot, file.path).split(path.sep).join('/'),
+            size: file.size,
+            mimeType: file.mimetype || mime.lookup(file.path) || 'application/octet-stream',
+            isImage
+          };
+
+          if (isImage) {
+            const buffer = await fsPromises.readFile(file.path);
+            attachment.data = `data:${attachment.mimeType};base64,${buffer.toString('base64')}`;
+          }
+
+          return attachment;
+        }));
+
+        res.json({
+          attachments,
+          images: attachments.filter(item => item.isImage)
+        });
       } catch (error) {
-        // console.error('Error processing images:', error);
-        // Clean up any remaining files
-        await Promise.all(req.files.map(f => fs.unlink(f.path).catch(() => {})));
-        res.status(500).json({ error: 'Failed to process images' });
+        res.status(500).json({ error: error.message || 'Failed to process attachments' });
       }
     });
   } catch (error) {
-    // console.error('Error in image upload endpoint:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
 

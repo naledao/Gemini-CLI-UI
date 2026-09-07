@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { GitBranch, GitCommit, Plus, Minus, RefreshCw, Check, X, ChevronDown, ChevronRight, Info, History, FileText, Mic, MicOff, Sparkles, Download, RotateCcw, Trash2, AlertTriangle, Upload } from 'lucide-react';
+import { GitBranch, GitCommit, Plus, Minus, RefreshCw, Check, X, ChevronDown, ChevronRight, Info, History, FileText, Mic, MicOff, Sparkles, Download, RotateCcw, Trash2, AlertTriangle, Upload, Maximize2, Minimize2 } from 'lucide-react';
 import { MicButton } from './MicButton.jsx';
+import { EnhancedMessageRenderer } from './EnhancedMessageRenderer.jsx';
 import { authenticatedFetch } from '../utils/api';
 import { useLanguage } from '../contexts/LanguageContext';
 
@@ -10,7 +11,17 @@ function GitPanel({ selectedProject, isMobile }) {
   const [gitDiff, setGitDiff] = useState({});
   const [isLoading, setIsLoading] = useState(false);
   const [commitMessage, setCommitMessage] = useState('');
-  const [expandedFiles, setExpandedFiles] = useState(new Set());
+  const [expandedDirectories, setExpandedDirectories] = useState(new Set());
+  const [untrackedDirectoryFiles, setUntrackedDirectoryFiles] = useState({});
+  const [loadingUntrackedDirectories, setLoadingUntrackedDirectories] = useState(new Set());
+  const [diffModal, setDiffModal] = useState(null); // { filePath, status }
+  const [loadingDiffFiles, setLoadingDiffFiles] = useState(new Set());
+  const [diffErrors, setDiffErrors] = useState({});
+  const [markdownContent, setMarkdownContent] = useState({});
+  const [loadingMarkdownFiles, setLoadingMarkdownFiles] = useState(new Set());
+  const [markdownErrors, setMarkdownErrors] = useState({});
+  const [diffModalView, setDiffModalView] = useState('diff'); // 'preview' or 'diff'
+  const [isDiffModalMaximized, setIsDiffModalMaximized] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState(new Set());
   const [isCommitting, setIsCommitting] = useState(false);
   const [currentBranch, setCurrentBranch] = useState('');
@@ -35,6 +46,14 @@ function GitPanel({ selectedProject, isMobile }) {
   const textareaRef = useRef(null);
   const dropdownRef = useRef(null);
 
+  const isMarkdownFile = (filePath = '') => /\.(md|markdown)$/i.test(filePath);
+
+  const closeDiffModal = () => {
+    setDiffModal(null);
+    setDiffModalView('diff');
+    setIsDiffModalMaximized(false);
+  };
+
   useEffect(() => {
     if (selectedProject) {
       fetchGitStatus();
@@ -45,6 +64,23 @@ function GitPanel({ selectedProject, isMobile }) {
       }
     }
   }, [selectedProject, activeView]);
+
+  useEffect(() => {
+    closeDiffModal();
+  }, [selectedProject?.name]);
+
+  useEffect(() => {
+    if (!diffModal) return;
+
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        closeDiffModal();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [diffModal]);
 
   // Handle click outside dropdown
   useEffect(() => {
@@ -86,13 +122,6 @@ function GitPanel({ selectedProject, isMobile }) {
         ]);
         setSelectedFiles(allFiles);
         
-        // Fetch diffs for changed files
-        for (const file of data.modified || []) {
-          fetchFileDiff(file);
-        }
-        for (const file of data.added || []) {
-          fetchFileDiff(file);
-        }
       }
     } catch (error) {
       console.error('Error fetching git status:', error);
@@ -323,18 +352,97 @@ function GitPanel({ selectedProject, isMobile }) {
   };
 
   const fetchFileDiff = async (filePath) => {
+    if (loadingDiffFiles.has(filePath)) return;
+
+    setLoadingDiffFiles(prev => new Set(prev).add(filePath));
+    setDiffErrors(prev => {
+      const next = { ...prev };
+      delete next[filePath];
+      return next;
+    });
+
     try {
       const response = await authenticatedFetch(`/api/git/diff?project=${encodeURIComponent(selectedProject.name)}&file=${encodeURIComponent(filePath)}`);
       const data = await response.json();
-      
-      if (!data.error && data.diff) {
-        setGitDiff(prev => ({
-          ...prev,
-          [filePath]: data.diff
-        }));
+
+      if (data.error) {
+        throw new Error(data.error);
       }
+
+      setGitDiff(prev => ({
+        ...prev,
+        [filePath]: data.diff || ''
+      }));
     } catch (error) {
       console.error('Error fetching file diff:', error);
+      setDiffErrors(prev => ({ ...prev, [filePath]: error.message || 'Failed to load diff' }));
+    } finally {
+      setLoadingDiffFiles(prev => {
+        const next = new Set(prev);
+        next.delete(filePath);
+        return next;
+      });
+    }
+  };
+
+  const fetchMarkdownContent = async (filePath) => {
+    if (loadingMarkdownFiles.has(filePath) || Object.prototype.hasOwnProperty.call(markdownContent, filePath)) return;
+
+    setLoadingMarkdownFiles(prev => new Set(prev).add(filePath));
+    setMarkdownErrors(prev => {
+      const next = { ...prev };
+      delete next[filePath];
+      return next;
+    });
+
+    try {
+      const response = await authenticatedFetch(
+        `/api/git/file-content?project=${encodeURIComponent(selectedProject.name)}&file=${encodeURIComponent(filePath)}`
+      );
+      const data = await response.json();
+
+      if (!response.ok || data.error) {
+        throw new Error(data.error || `Failed to load file (${response.status})`);
+      }
+
+      setMarkdownContent(prev => ({ ...prev, [filePath]: data.content || '' }));
+    } catch (error) {
+      console.error('Error fetching markdown content:', error);
+      setMarkdownErrors(prev => ({
+        ...prev,
+        [filePath]: error.message || 'Failed to load Markdown preview'
+      }));
+    } finally {
+      setLoadingMarkdownFiles(prev => {
+        const next = new Set(prev);
+        next.delete(filePath);
+        return next;
+      });
+    }
+  };
+
+  const fetchUntrackedDirectoryFiles = async (directoryPath) => {
+    if (untrackedDirectoryFiles[directoryPath] || loadingUntrackedDirectories.has(directoryPath)) return;
+
+    setLoadingUntrackedDirectories(prev => new Set(prev).add(directoryPath));
+    try {
+      const response = await authenticatedFetch(
+        `/api/git/untracked-files?project=${encodeURIComponent(selectedProject.name)}&dir=${encodeURIComponent(directoryPath)}`
+      );
+      const data = await response.json();
+      setUntrackedDirectoryFiles(prev => ({
+        ...prev,
+        [directoryPath]: data.error ? [] : (data.files || [])
+      }));
+    } catch (error) {
+      console.error('Error fetching untracked directory files:', error);
+      setUntrackedDirectoryFiles(prev => ({ ...prev, [directoryPath]: [] }));
+    } finally {
+      setLoadingUntrackedDirectories(prev => {
+        const next = new Set(prev);
+        next.delete(directoryPath);
+        return next;
+      });
     }
   };
 
@@ -392,16 +500,36 @@ function GitPanel({ selectedProject, isMobile }) {
     }
   };
 
-  const toggleFileExpanded = (filePath) => {
-    setExpandedFiles(prev => {
+  const toggleUntrackedDirectory = (directoryPath) => {
+    const isCurrentlyExpanded = expandedDirectories.has(directoryPath);
+    if (!isCurrentlyExpanded) {
+      fetchUntrackedDirectoryFiles(directoryPath);
+    }
+
+    setExpandedDirectories(prev => {
       const newSet = new Set(prev);
-      if (newSet.has(filePath)) {
-        newSet.delete(filePath);
+      if (newSet.has(directoryPath)) {
+        newSet.delete(directoryPath);
       } else {
-        newSet.add(filePath);
+        newSet.add(directoryPath);
       }
       return newSet;
     });
+  };
+
+  const openDiffModal = (filePath, status) => {
+    const markdown = isMarkdownFile(filePath);
+    setDiffModal({ filePath, status });
+    setDiffModalView(markdown ? 'preview' : 'diff');
+    setIsDiffModalMaximized(false);
+
+    if (markdown) {
+      fetchMarkdownContent(filePath);
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(gitDiff, filePath) && !loadingDiffFiles.has(filePath)) {
+      fetchFileDiff(filePath);
+    }
   };
 
   const toggleCommitExpanded = (commitHash) => {
@@ -540,9 +668,11 @@ function GitPanel({ selectedProject, isMobile }) {
   };
 
   const renderFileItem = (filePath, status) => {
-    const isExpanded = expandedFiles.has(filePath);
     const isSelected = selectedFiles.has(filePath);
-    const diff = gitDiff[filePath];
+    const isUntrackedDirectory = status === 'U' && filePath.endsWith('/');
+    const isExpanded = isUntrackedDirectory && expandedDirectories.has(filePath);
+    const directoryFiles = untrackedDirectoryFiles[filePath] || [];
+    const isDirectoryLoading = loadingUntrackedDirectories.has(filePath);
     
     return (
       <div key={filePath} className="border-b border-gray-200 dark:border-gray-700 last:border-0">
@@ -556,10 +686,14 @@ function GitPanel({ selectedProject, isMobile }) {
           />
           <div 
             className="flex items-center flex-1 cursor-pointer"
-            onClick={() => toggleFileExpanded(filePath)}
+            onClick={() => isUntrackedDirectory ? toggleUntrackedDirectory(filePath) : openDiffModal(filePath, status)}
           >
             <div className={`p-0.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded ${isMobile ? 'mr-1' : 'mr-2'}`}>
-              <ChevronRight className={`w-3 h-3 transition-transform duration-200 ease-in-out ${isExpanded ? 'rotate-90' : 'rotate-0'}`} />
+              {isUntrackedDirectory ? (
+                <ChevronRight className={`w-3 h-3 transition-transform duration-200 ease-in-out ${isExpanded ? 'rotate-90' : 'rotate-0'}`} />
+              ) : (
+                <FileText className="w-3 h-3 text-gray-500 dark:text-gray-400" />
+              )}
             </div>
             <span className={`flex-1 truncate ${isMobile ? 'text-xs' : 'text-sm'}`}>{filePath}</span>
             <div className="flex items-center gap-1">
@@ -594,45 +728,37 @@ function GitPanel({ selectedProject, isMobile }) {
             </div>
           </div>
         </div>
-        <div className={`bg-gray-50 dark:bg-gray-900 transition-all duration-400 ease-in-out overflow-hidden ${
-          isExpanded && diff 
-            ? 'max-h-[600px] opacity-100 translate-y-0' 
-            : 'max-h-0 opacity-0 -translate-y-1'
-        }`}>
-            {/* Operation header */}
-            <div className="flex items-center justify-between p-2 border-b border-gray-200 dark:border-gray-700">
-              <div className="flex items-center gap-2">
-                <span 
-                  className={`inline-flex items-center justify-center w-5 h-5 rounded text-xs font-bold border ${
-                    status === 'M' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300 border-yellow-200 dark:border-yellow-800' :
-                    status === 'A' ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300 border-green-200 dark:border-green-800' :
-                    status === 'D' ? 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300 border-red-200 dark:border-red-800' :
-                    'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300 border-gray-300 dark:border-gray-600'
-                  }`}
-                >
-                  {status}
-                </span>
-                <span className="text-sm font-medium text-gray-900 dark:text-white">
-                  {getStatusLabel(status)}
-                </span>
+        {isUntrackedDirectory && isExpanded && (
+          <div className="bg-gray-50 dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700">
+            {isDirectoryLoading ? (
+              <div className="flex items-center gap-2 px-8 py-3 text-xs text-gray-500 dark:text-gray-400">
+                <RefreshCw className="w-3 h-3 animate-spin" />
+                <span>{language === 'zh' ? '正在加载目录内容...' : 'Loading directory contents...'}</span>
               </div>
-              {isMobile && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setWrapText(!wrapText);
-                  }}
-                  className="text-xs text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
-                  title={wrapText ? "Switch to horizontal scroll" : "Switch to text wrap"}
-                >
-                  {wrapText ? '↔️ Scroll' : '↩️ Wrap'}
-                </button>
-              )}
-            </div>
-            <div className="max-h-96 overflow-y-auto p-2">
-              {diff && diff.split('\n').map((line, index) => renderDiffLine(line, index))}
-            </div>
-        </div>
+            ) : directoryFiles.length === 0 ? (
+              <div className="px-8 py-3 text-xs text-gray-500 dark:text-gray-400">
+                {language === 'zh' ? '目录中没有可显示的未跟踪文件' : 'No untracked files found in this directory'}
+              </div>
+            ) : directoryFiles.map(childPath => {
+              const displayPath = childPath.startsWith(filePath) ? childPath.slice(filePath.length) : childPath;
+
+              return (
+                <div key={`${filePath}:${childPath}`} className="border-b border-gray-200 dark:border-gray-700 last:border-0">
+                  <div
+                    className={`flex items-center hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer ${isMobile ? 'pl-6 pr-2 py-1.5' : 'pl-8 pr-3 py-2'}`}
+                    onClick={() => openDiffModal(childPath, 'U')}
+                  >
+                    <div className={`p-0.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded ${isMobile ? 'mr-1' : 'mr-2'}`}>
+                      <FileText className="w-3 h-3 text-gray-500 dark:text-gray-400" />
+                    </div>
+                    <span className="flex-1 truncate font-mono text-xs" title={childPath}>{displayPath}</span>
+                    <span className="inline-flex items-center justify-center w-5 h-5 rounded text-xs font-bold border bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300 border-gray-300 dark:border-gray-600" title="Untracked">U</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     );
   };
@@ -797,12 +923,8 @@ function GitPanel({ selectedProject, isMobile }) {
         </div>
       ) : (
         <>
-          {/* Tab Navigation - Only show when git is available and no files expanded */}
-          <div className={`flex border-b border-gray-200 dark:border-gray-700 transition-all duration-300 ease-in-out ${
-            expandedFiles.size === 0 
-              ? 'max-h-16 opacity-100 translate-y-0' 
-              : 'max-h-0 opacity-0 -translate-y-2 overflow-hidden'
-          }`}>
+          {/* Tab Navigation */}
+          <div className="flex border-b border-gray-200 dark:border-gray-700">
             <button
               onClick={() => setActiveView('changes')}
               className={`flex-1 px-4 py-2 text-sm font-medium transition-colors ${
@@ -834,12 +956,8 @@ function GitPanel({ selectedProject, isMobile }) {
           {/* Changes View */}
           {activeView === 'changes' && (
             <>
-              {/* Mobile Commit Toggle Button / Desktop Always Visible - Hide when files expanded */}
-              <div className={`transition-all duration-300 ease-in-out ${
-                expandedFiles.size === 0 
-                  ? 'max-h-96 opacity-100 translate-y-0' 
-                  : 'max-h-0 opacity-0 -translate-y-2 overflow-hidden'
-              }`}>
+              {/* Mobile Commit Toggle Button / Desktop Always Visible */}
+              <div>
                 {isMobile && isCommitAreaCollapsed ? (
                   <div className="px-4 py-2 border-b border-gray-200 dark:border-gray-700">
                       <button
@@ -929,13 +1047,9 @@ function GitPanel({ selectedProject, isMobile }) {
             </>
           )}
 
-          {/* File Selection Controls - Only show in changes view and when git is working and no files expanded */}
+          {/* File Selection Controls */}
           {activeView === 'changes' && gitStatus && !gitStatus.error && (
-            <div className={`border-b border-gray-200 dark:border-gray-700 flex items-center justify-between transition-all duration-300 ease-in-out ${isMobile ? 'px-3 py-1.5' : 'px-4 py-2'} ${
-              expandedFiles.size === 0 
-                ? 'max-h-16 opacity-100 translate-y-0' 
-                : 'max-h-0 opacity-0 -translate-y-2 overflow-hidden'
-            }`}>
+            <div className={`border-b border-gray-200 dark:border-gray-700 flex items-center justify-between ${isMobile ? 'px-3 py-1.5' : 'px-4 py-2'}`}>
               <span className={`text-gray-600 dark:text-gray-400 ${isMobile ? 'text-xs' : 'text-xs'}`}>
                 {selectedFiles.size} of {(gitStatus?.modified?.length || 0) + (gitStatus?.added?.length || 0) + (gitStatus?.deleted?.length || 0) + (gitStatus?.untracked?.length || 0)} {isMobile ? '' : 'files'} selected
               </span>
@@ -1052,6 +1166,170 @@ function GitPanel({ selectedProject, isMobile }) {
               {recentCommits.map(commit => renderCommitItem(commit))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* File Diff Modal */}
+      {diffModal && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center p-0 sm:p-5">
+          <div
+            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+            onClick={closeDiffModal}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={diffModal.filePath}
+            onClick={(e) => e.stopPropagation()}
+            className={`relative flex flex-col bg-white dark:bg-gray-900 shadow-2xl border border-gray-200 dark:border-gray-700 overflow-hidden ${
+              isMobile
+                ? 'w-full h-full'
+                : isDiffModalMaximized
+                  ? 'w-[96vw] h-[94vh] rounded-xl'
+                  : 'w-[min(1100px,92vw)] h-[min(82vh,820px)] rounded-xl'
+            }`}
+          >
+            <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/80 flex-shrink-0">
+              <span
+                className={`inline-flex items-center justify-center w-6 h-6 rounded text-xs font-bold border flex-shrink-0 ${
+                  diffModal.status === 'M' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300 border-yellow-200 dark:border-yellow-800' :
+                  diffModal.status === 'A' ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300 border-green-200 dark:border-green-800' :
+                  diffModal.status === 'D' ? 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300 border-red-200 dark:border-red-800' :
+                  'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300 border-gray-300 dark:border-gray-600'
+                }`}
+                title={getStatusLabel(diffModal.status)}
+              >
+                {diffModal.status}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-semibold text-gray-900 dark:text-white truncate" title={diffModal.filePath}>
+                  {diffModal.filePath}
+                </div>
+                <div className="text-xs text-gray-500 dark:text-gray-400">
+                  {getStatusLabel(diffModal.status)} · {isMarkdownFile(diffModal.filePath) && diffModalView === 'preview'
+                    ? (language === 'zh' ? 'Markdown 预览' : 'Markdown Preview')
+                    : 'Diff'}
+                </div>
+              </div>
+              {isMarkdownFile(diffModal.filePath) && (
+                <div className="flex items-center p-0.5 rounded-md bg-gray-200 dark:bg-gray-700 flex-shrink-0">
+                  <button
+                    onClick={() => setDiffModalView('preview')}
+                    className={`px-2.5 py-1 text-xs rounded transition-colors ${
+                      diffModalView === 'preview'
+                        ? 'bg-white dark:bg-gray-900 text-blue-600 dark:text-blue-400 shadow-sm'
+                        : 'text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white'
+                    }`}
+                  >
+                    {language === 'zh' ? '预览' : 'Preview'}
+                  </button>
+                  <button
+                    onClick={() => setDiffModalView('diff')}
+                    className={`px-2.5 py-1 text-xs rounded transition-colors ${
+                      diffModalView === 'diff'
+                        ? 'bg-white dark:bg-gray-900 text-blue-600 dark:text-blue-400 shadow-sm'
+                        : 'text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white'
+                    }`}
+                  >
+                    Diff
+                  </button>
+                </div>
+              )}
+              {isMobile && (
+                <button
+                  onClick={() => setWrapText(!wrapText)}
+                  className="px-2 py-1 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 rounded"
+                >
+                  {wrapText ? '↔️ Scroll' : '↩️ Wrap'}
+                </button>
+              )}
+              {!isMobile && (
+                <button
+                  onClick={() => setIsDiffModalMaximized(prev => !prev)}
+                  className="p-2 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-gray-700 rounded-md"
+                  title={isDiffModalMaximized
+                    ? (language === 'zh' ? '还原窗口' : 'Restore')
+                    : (language === 'zh' ? '放大窗口' : 'Maximize')}
+                >
+                  {isDiffModalMaximized
+                    ? <Minimize2 className="w-5 h-5" />
+                    : <Maximize2 className="w-5 h-5" />}
+                </button>
+              )}
+              <button
+                onClick={closeDiffModal}
+                className="p-2 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-gray-700 rounded-md"
+                title={language === 'zh' ? '关闭' : 'Close'}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-auto bg-white dark:bg-gray-950 p-3">
+              {isMarkdownFile(diffModal.filePath) && diffModalView === 'preview' ? (
+                loadingMarkdownFiles.has(diffModal.filePath) ? (
+                  <div className="h-full flex items-center justify-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>{language === 'zh' ? '正在加载 Markdown 预览...' : 'Loading Markdown preview...'}</span>
+                  </div>
+                ) : markdownErrors[diffModal.filePath] ? (
+                  <div className="h-full flex items-center justify-center px-6 text-center">
+                    <div>
+                      <AlertTriangle className="w-8 h-8 mx-auto mb-3 text-red-500" />
+                      <div className="text-sm font-medium text-red-600 dark:text-red-400 mb-1">
+                        {language === 'zh' ? '加载 Markdown 预览失败' : 'Failed to load Markdown preview'}
+                      </div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400 break-all">
+                        {markdownErrors[diffModal.filePath]}
+                      </div>
+                    </div>
+                  </div>
+                ) : Object.prototype.hasOwnProperty.call(markdownContent, diffModal.filePath) ? (
+                  <div className="max-w-5xl mx-auto px-2 sm:px-5 py-2">
+                    <EnhancedMessageRenderer
+                      content={markdownContent[diffModal.filePath]}
+                      isDarkMode={document.documentElement.classList.contains('dark')}
+                    />
+                  </div>
+                ) : (
+                  <div className="h-full flex items-center justify-center text-sm text-gray-500 dark:text-gray-400">
+                    {language === 'zh' ? '正在准备 Markdown 预览...' : 'Preparing Markdown preview...'}
+                  </div>
+                )
+              ) : loadingDiffFiles.has(diffModal.filePath) ? (
+                <div className="h-full flex items-center justify-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>{language === 'zh' ? '正在加载文件变更...' : 'Loading file diff...'}</span>
+                </div>
+              ) : diffErrors[diffModal.filePath] ? (
+                <div className="h-full flex items-center justify-center px-6 text-center">
+                  <div>
+                    <AlertTriangle className="w-8 h-8 mx-auto mb-3 text-red-500" />
+                    <div className="text-sm font-medium text-red-600 dark:text-red-400 mb-1">
+                      {language === 'zh' ? '加载 Diff 失败' : 'Failed to load diff'}
+                    </div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400 break-all">
+                      {diffErrors[diffModal.filePath]}
+                    </div>
+                  </div>
+                </div>
+              ) : Object.prototype.hasOwnProperty.call(gitDiff, diffModal.filePath) ? (
+                gitDiff[diffModal.filePath] ? (
+                  <div className="min-w-max">
+                    {gitDiff[diffModal.filePath].split('\n').map((line, index) => renderDiffLine(line, index))}
+                  </div>
+                ) : (
+                  <div className="h-full flex items-center justify-center text-sm text-gray-500 dark:text-gray-400">
+                    {language === 'zh' ? '这个文件没有可显示的 Diff。' : 'No diff content to display for this file.'}
+                  </div>
+                )
+              ) : (
+                <div className="h-full flex items-center justify-center text-sm text-gray-500 dark:text-gray-400">
+                  {language === 'zh' ? '正在准备 Diff...' : 'Preparing diff...'}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

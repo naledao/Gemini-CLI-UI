@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import ChatInterface from './ChatInterface';
-import CodeEditor from './CodeEditor';
+import FileViewer from './FileViewer';
 import { useLanguage } from '../contexts/LanguageContext';
 import { PanelLeftClose, PanelLeftOpen, FolderGit2, Terminal } from 'lucide-react';
 import ProjectContextPanel from './ProjectContextPanel';
@@ -23,7 +23,6 @@ function MainContent({
   onReplaceTemporarySession,
   onNavigateToSession,
   onShowSettings,
-  autoExpandTools,
   showRawParameters,
   autoScrollToBottom
 }) {
@@ -48,7 +47,9 @@ function MainContent({
     const file = {
       name: filePath.split('/').pop(),
       path: filePath,
-      diffInfo: diffInfo
+      diffInfo: diffInfo,
+      projectName: selectedProject?.name,
+      projectPath: selectedProject?.path
     };
     setEditingFile(file);
   };
@@ -209,6 +210,7 @@ function MainContent({
       <div className="flex-1 flex min-h-0 overflow-hidden relative">
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
           <ChatInterface
+            key={selectedProject.name}
             selectedProject={selectedProject}
             selectedSession={selectedSession}
             ws={ws}
@@ -221,7 +223,6 @@ function MainContent({
             onReplaceTemporarySession={onReplaceTemporarySession}
             onNavigateToSession={onNavigateToSession}
             onShowSettings={onShowSettings}
-            autoExpandTools={autoExpandTools}
             showRawParameters={showRawParameters}
             autoScrollToBottom={autoScrollToBottom}
           />
@@ -264,9 +265,9 @@ function MainContent({
         </div>
       )}
 
-      {/* Code Editor Modal (for viewing diffs/files opened in chat) */}
+      {/* Unified file viewer (for files opened in chat/tool calls) */}
       {editingFile && (
-        <CodeEditor
+        <FileViewer
           file={editingFile}
           onClose={handleCloseEditor}
           projectPath={selectedProject?.path}

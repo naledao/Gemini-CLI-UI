@@ -57,10 +57,6 @@ function AppContent() {
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [showToolsSettings, setShowToolsSettings] = useState(false);
   const [showQuickSettings, setShowQuickSettings] = useState(false);
-  const [autoExpandTools, setAutoExpandTools] = useState(() => {
-    const saved = localStorage.getItem('autoExpandTools');
-    return saved !== null ? JSON.parse(saved) : false;
-  });
   const [showRawParameters, setShowRawParameters] = useState(() => {
     const saved = localStorage.getItem('showRawParameters');
     return saved !== null ? JSON.parse(saved) : false;
@@ -146,16 +142,30 @@ function AppContent() {
   useEffect(() => {
     if (messages.length > 0) {
       const latestMessage = messages[messages.length - 1];
+
+      // Runtime lifecycle bookkeeping belongs here (above ChatInterface) so a
+      // project can keep running safely while the user views another project.
+      if (latestMessage.projectName && latestMessage.type === 'session-created' && latestMessage.sessionId) {
+        replaceTemporarySession(latestMessage.projectName, latestMessage.sessionId, latestMessage.runId);
+      } else if (
+        latestMessage.projectName &&
+        ['gemini-complete', 'gemini-error', 'session-aborted'].includes(latestMessage.type)
+      ) {
+        markSessionAsInactive(latestMessage.projectName, latestMessage.sessionId, latestMessage.runId);
+      }
       
       if (latestMessage.type === 'projects_updated') {
         
         // Session Protection Logic: Allow additions but prevent changes during active conversations
         // This allows new sessions/projects to appear in sidebar while protecting active chat messages
-        // We check for two types of active sessions:
-        // 1. Existing sessions: selectedSession.id exists in activeSessions
-        // 2. New sessions: temporary "new-session-*" identifiers in activeSessions (before real session ID is received)
-        const hasActiveSession = (selectedSession && activeSessions.has(selectedSession.id)) ||
-                                 (activeSessions.size > 0 && Array.from(activeSessions).some(id => id.startsWith('new-session-')));
+        // Only the currently selected project's active tasks should affect its
+        // sidebar refresh protection. Background tasks in other projects must
+        // not freeze or alter this project.
+        const selectedProjectPrefix = selectedProject ? `${selectedProject.name}::` : '';
+        const hasActiveSession = !!selectedProject && (
+          (selectedSession && activeSessions.has(`${selectedProjectPrefix}${selectedSession.id}`)) ||
+          (!selectedSession && Array.from(activeSessions).some(id => id.startsWith(`${selectedProjectPrefix}run:`)))
+        );
         
         if (hasActiveSession) {
           // Allow updates but be selective: permit additions, prevent changes to existing items
@@ -410,39 +420,40 @@ function AppContent() {
 
   // Session Protection Functions: Manage the lifecycle of active sessions
   
-  // markSessionAsActive: Called when user sends a message to mark session as protected
-  // This includes both real session IDs and temporary "new-session-*" identifiers
-  const markSessionAsActive = (sessionId) => {
-    if (sessionId) {
-      setActiveSessions(prev => new Set([...prev, sessionId]));
+  // markSessionAsActive: project-scoped so concurrent projects never collide.
+  const markSessionAsActive = (projectName, sessionId) => {
+    if (projectName && sessionId) {
+      setActiveSessions(prev => new Set([...prev, `${projectName}::${sessionId}`]));
     }
   };
 
   // markSessionAsInactive: Called when conversation completes/aborts to re-enable project updates
-  const markSessionAsInactive = (sessionId) => {
-    if (sessionId) {
+  const markSessionAsInactive = (projectName, sessionId, runId = null) => {
+    if (projectName) {
       setActiveSessions(prev => {
         const newSet = new Set(prev);
-        newSet.delete(sessionId);
+        if (sessionId) {
+          newSet.delete(`${projectName}::${sessionId}`);
+        }
+        if (runId) {
+          newSet.delete(`${projectName}::run:${runId}`);
+        }
         return newSet;
       });
     }
   };
 
   // replaceTemporarySession: Called when WebSocket provides real session ID for new sessions
-  // Removes temporary "new-session-*" identifiers and adds the real session ID
+  // Replaces only this project's run key and leaves other projects untouched.
   // This maintains protection continuity during the transition from temporary to real session
-  const replaceTemporarySession = (realSessionId) => {
-    if (realSessionId) {
+  const replaceTemporarySession = (projectName, realSessionId, runId = null) => {
+    if (projectName && realSessionId) {
       setActiveSessions(prev => {
-        const newSet = new Set();
-        // Keep all non-temporary sessions and add the real session ID
-        for (const sessionId of prev) {
-          if (!sessionId.startsWith('new-session-')) {
-            newSet.add(sessionId);
-          }
+        const newSet = new Set(prev);
+        if (runId) {
+          newSet.delete(`${projectName}::run:${runId}`);
         }
-        newSet.add(realSessionId);
+        newSet.add(`${projectName}::${realSessionId}`);
         return newSet;
       });
     }
@@ -635,7 +646,6 @@ function AppContent() {
           onReplaceTemporarySession={replaceTemporarySession}
           onNavigateToSession={(sessionId) => navigate(`/session/${sessionId}`)}
           onShowSettings={() => setShowToolsSettings(true)}
-          autoExpandTools={autoExpandTools}
           showRawParameters={showRawParameters}
           autoScrollToBottom={autoScrollToBottom}
         />
@@ -645,11 +655,6 @@ function AppContent() {
       <QuickSettingsPanel
         isOpen={showQuickSettings}
         onToggle={setShowQuickSettings}
-        autoExpandTools={autoExpandTools}
-        onAutoExpandChange={(value) => {
-          setAutoExpandTools(value);
-          localStorage.setItem('autoExpandTools', JSON.stringify(value));
-        }}
         showRawParameters={showRawParameters}
         onShowRawParametersChange={(value) => {
           setShowRawParameters(value);
