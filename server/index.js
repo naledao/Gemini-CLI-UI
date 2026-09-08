@@ -40,17 +40,20 @@ import { getProjects, getSessions, getSessionMessages, renameProject, deleteSess
 import {
   spawnGemini,
   abortGeminiSession,
+  getGeminiRunStatus,
   GEMINI_BINARY_SETTING_KEY,
   getConfiguredGeminiBinaryPath,
   resolveEmbeddedGeminiPath,
   resolveGeminiLaunch
 } from './gemini-cli.js';
-import sessionManager from './sessionManager.js';
 import authRoutes from './routes/auth.js';
 import mcpRoutes from './routes/mcp.js';
 import gitRoutes from './routes/git.js';
 import { initializeDatabase, settingsDb } from './database/db.js';
 import { validateApiKey, authenticateToken, authenticateWebSocket } from './middleware/auth.js';
+import { getSystemHomeDirectory, createSystemUserEnvironment } from './system-home.js';
+
+const systemHome = getSystemHomeDirectory();
 
 // File system watcher for projects folder
 let projectsWatcher = null;
@@ -60,7 +63,7 @@ let activeFolderPicker = null;
 // Setup file system watcher for Gemini projects folder using chokidar
 async function setupProjectsWatcher() {
   const chokidar = (await import('chokidar')).default;
-  const geminiProjectsPath = path.join(process.env.HOME, '.gemini', 'projects');
+  const geminiProjectsPath = path.join(systemHome, '.gemini', 'projects');
   
   if (projectsWatcher) {
     projectsWatcher.close();
@@ -189,7 +192,7 @@ app.use(express.static(path.join(__dirname, '../dist')));
 
 // Helper to read local Gemini CLI configuration (model and thinking settings)
 function getLocalGeminiConfig() {
-  const settingsPath = path.join(process.env.HOME || '/root', '.gemini', 'settings.json');
+  const settingsPath = path.join(systemHome, '.gemini', 'settings.json');
   let config = {
     model: 'gemini-3.8-flash',
     thinkingLevel: 'HIGH',
@@ -233,6 +236,13 @@ app.get('/api/config', authenticateToken, (req, res) => {
   });
 });
 
+// Reconcile browser-side run state after WebSocket reconnects. A terminal
+// event can be lost when the socket that launched the run has already closed,
+// so the client can ask the process registry whether this run is still alive.
+app.get('/api/gemini/runs/:runId/status', authenticateToken, (req, res) => {
+  res.json(getGeminiRunStatus(req.params.runId));
+});
+
 function isLoopbackRequest(req) {
   const remoteAddress = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
   return remoteAddress === '127.0.0.1' ||
@@ -253,7 +263,7 @@ function validateGeminiBinaryLaunch(launch) {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
         shell: false,
-        env: { ...process.env }
+        env: createSystemUserEnvironment()
       }
     );
 
@@ -421,7 +431,7 @@ app.post('/api/system/select-gemini-binary', authenticateToken, (req, res) => {
   const picker = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-STA', '-Command', powerShellScript], {
     windowsHide: false,
     env: {
-      ...process.env,
+      ...createSystemUserEnvironment(),
       GEMINI_CLI_UI_INITIAL_BINARY: initialPath
     }
   });
@@ -498,7 +508,7 @@ app.post('/api/system/select-folder', authenticateToken, (req, res) => {
     {
       windowsHide: false,
       env: {
-        ...process.env,
+        ...createSystemUserEnvironment(),
         GEMINI_CLI_UI_INITIAL_FOLDER: initialPath
       }
     }
@@ -593,20 +603,9 @@ app.get('/api/projects', authenticateToken, async (req, res) => {
 
 app.get('/api/projects/:projectName/sessions', authenticateToken, async (req, res) => {
   try {
-    // Extract the actual project directory path
-    const projectPath = await extractProjectDirectory(req.params.projectName);
-    
-    // Get sessions from sessionManager
-    const sessions = sessionManager.getProjectSessions(projectPath);
-    
-    // Apply pagination
     const { limit = 5, offset = 0 } = req.query;
-    const paginatedSessions = sessions.slice(parseInt(offset), parseInt(offset) + parseInt(limit));
-    
-    res.json({
-      sessions: paginatedSessions,
-      total: sessions.length
-    });
+    const result = await getSessions(req.params.projectName, Number(limit), Number(offset));
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -616,7 +615,7 @@ app.get('/api/projects/:projectName/sessions', authenticateToken, async (req, re
 app.get('/api/projects/:projectName/sessions/:sessionId/messages', authenticateToken, async (req, res) => {
   try {
     const { projectName, sessionId } = req.params;
-    const messages = sessionManager.getSessionMessages(sessionId);
+    const messages = await getSessionMessages(projectName, sessionId);
     res.json({ messages });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -638,7 +637,7 @@ app.put('/api/projects/:projectName/rename', authenticateToken, async (req, res)
 app.delete('/api/projects/:projectName/sessions/:sessionId', authenticateToken, async (req, res) => {
   try {
     const { projectName, sessionId } = req.params;
-    await sessionManager.deleteSession(sessionId);
+    await deleteSession(projectName, sessionId);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -662,9 +661,9 @@ app.get('/api/filesystem/directories', authenticateToken, async (req, res) => {
   try {
     let inputPath = req.query.path ? req.query.path.trim() : '';
     if (!inputPath) {
-      inputPath = process.env.HOME || '/root';
+      inputPath = systemHome;
     } else if (inputPath === '~' || inputPath.startsWith('~/')) {
-      inputPath = inputPath.replace(/^~/, process.env.HOME || '/root');
+      inputPath = inputPath.replace(/^~/, systemHome);
     }
 
     // Resolve path
@@ -761,7 +760,6 @@ app.post('/api/projects/create', authenticateToken, async (req, res) => {
 
 // Helper to recursively build file tree for FileTree component
 async function buildFileTree(dirPath, maxDepth = 4, depth = 0) {
-  if (depth > maxDepth) return [];
   try {
     const entries = await fsPromises.readdir(dirPath, { withFileTypes: true });
     const items = [];
@@ -801,7 +799,16 @@ async function buildFileTree(dirPath, maxDepth = 4, depth = 0) {
         };
 
         if (isDirectory) {
-          item.children = await buildFileTree(fullPath, maxDepth, depth + 1);
+          if (depth >= maxDepth) {
+            // The directory exists, but its contents were intentionally not
+            // loaded yet. Keep this distinct from a genuinely empty folder so
+            // the client can lazy-load it when the user expands the row.
+            item.children = null;
+            item.childrenLoaded = false;
+          } else {
+            item.children = await buildFileTree(fullPath, maxDepth, depth + 1);
+            item.childrenLoaded = true;
+          }
         }
 
         items.push(item);
@@ -868,6 +875,34 @@ app.get('/api/projects/:projectName/files', authenticateToken, async (req, res) 
   } catch (error) {
     console.error('Error fetching project files:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Lazy-load exactly one directory level for the file tree. Resolve the target
+// through the same project-boundary guard used by file reads so traversal and
+// symlinks cannot escape the selected project root.
+app.get('/api/projects/:projectName/files/children', authenticateToken, async (req, res) => {
+  try {
+    const { projectName } = req.params;
+    const resolved = await resolveProjectFilePath(projectName, req.query.path);
+    const stat = await fsPromises.stat(resolved.filePath);
+
+    if (!stat.isDirectory()) {
+      return res.status(400).json({ error: 'Path is not a directory' });
+    }
+
+    // maxDepth=0 returns immediate children only. Child directories remain
+    // marked childrenLoaded=false until the user expands them.
+    const children = await buildFileTree(resolved.filePath, 0, 0);
+    res.json(children);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      res.status(404).json({ error: 'Directory not found' });
+    } else if (error.code === 'EACCES') {
+      res.status(403).json({ error: 'Permission denied' });
+    } else {
+      res.status(error.statusCode || 500).json({ error: error.message });
+    }
   }
 });
 
@@ -1014,7 +1049,7 @@ function handleShellConnection(ws) {
       const data = JSON.parse(message);
 
       if (data.type === 'init') {
-        const projectPath = data.projectPath || process.env.HOME || '/root';
+        const projectPath = data.projectPath || systemHome;
         const cols = data.cols || 80;
         const rows = data.rows || 24;
 
@@ -1026,7 +1061,7 @@ function handleShellConnection(ws) {
             cwd = path.dirname(cwd);
           }
         } catch (e) {
-          cwd = process.env.HOME || '/root';
+          cwd = systemHome;
         }
 
         console.log(`🐚 Starting interactive shell in: ${cwd} (${cols}x${rows})`);
@@ -1038,7 +1073,7 @@ function handleShellConnection(ws) {
             rows: rows,
             cwd: cwd,
             env: {
-              ...process.env,
+              ...createSystemUserEnvironment(),
               TERM: 'xterm-256color',
               COLORTERM: 'truecolor',
               FORCE_COLOR: '3'

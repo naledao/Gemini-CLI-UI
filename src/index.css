@@ -278,6 +278,42 @@
   .scrollbar-thin::-webkit-scrollbar-thumb:hover {
     background-color: hsl(var(--muted-foreground) / 0.8);
   }
+
+  /* Markdown code blocks use exactly one native horizontal scroll owner.
+     react-syntax-highlighter renders a <pre> internally; letting that <pre>
+     scroll as well creates nested scrollbars whose thumb can become very
+     difficult (or impossible) to drag inside the chat's vertical scroller. */
+  .code-scroll-container {
+    pointer-events: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: auto;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.7) hsl(var(--muted) / 0.45);
+  }
+
+  .code-scroll-container > pre {
+    overflow: visible !important;
+    width: max-content !important;
+    min-width: 100% !important;
+  }
+
+  .code-scroll-container::-webkit-scrollbar {
+    height: 10px;
+  }
+
+  .code-scroll-container::-webkit-scrollbar-track {
+    background: hsl(var(--muted) / 0.45);
+  }
+
+  .code-scroll-container::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--muted-foreground) / 0.7);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .code-scroll-container::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground) / 0.9);
+  }
   
   /* Dark mode scrollbar styles */
   .dark .scrollbar-thin {
@@ -334,7 +370,18 @@
   /* Prevent collapsing margins */
   .chat-message {
     display: block;
-    overflow: hidden;
+    overflow: visible;
+  }
+
+  /* Conversation content should behave like normal document text. Explicitly
+     opt the message body back into native text selection so Markdown's nested
+     paragraphs/lists/code spans can be selected continuously and copied. */
+  .chat-message,
+  .chat-message .prose,
+  .chat-message .prose *,
+  .chat-message .whitespace-pre-wrap {
+    -webkit-user-select: text;
+    user-select: text;
   }
   
   /* Ensure consistent line heights */
@@ -501,7 +548,7 @@
 
   /* Message layout stability */
   .chat-message {
-    contain: layout style;
+    contain: none;
     will-change: auto;
   }
 
@@ -518,6 +565,36 @@
 
   .chat-message .prose p:last-child {
     margin-bottom: 0;
+  }
+
+  /* Nested Markdown containers should control their own vertical rhythm.
+     This avoids oversized table rows/list items while preserving normal
+     paragraph spacing at the top level. */
+  .chat-message .prose li > p,
+  .chat-message .prose td > p,
+  .chat-message .prose th > p,
+  .chat-message .prose blockquote > p {
+    margin-top: 0;
+    margin-bottom: 0;
+  }
+
+  .chat-message .prose li > ul,
+  .chat-message .prose li > ol {
+    margin-top: 0.35rem;
+    margin-bottom: 0.35rem;
+  }
+
+  .chat-message .prose table code {
+    white-space: normal;
+  }
+
+  .chat-message .prose .contains-task-list {
+    padding-left: 0;
+  }
+
+  .chat-message .prose .task-list-item > p {
+    flex: 1 1 auto;
+    min-width: 0;
   }
 
   /* Prevent code block layout shift */

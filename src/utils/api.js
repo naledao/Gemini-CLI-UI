@@ -71,6 +71,8 @@ export const api = {
     }),
   getGeminiBinarySettings: () =>
     authenticatedFetch('/api/settings/gemini-binary'),
+  getGeminiRunStatus: (runId) =>
+    authenticatedFetch(`/api/gemini/runs/${encodeURIComponent(runId)}/status`),
   setGeminiBinary: (path) =>
     authenticatedFetch('/api/settings/gemini-binary', {
       method: 'PUT',
@@ -101,6 +103,8 @@ export const api = {
     }),
   getFiles: (projectName) =>
     authenticatedFetch(`/api/projects/${encodeURIComponent(projectName)}/files`),
+  getFileChildren: (projectName, directoryPath) =>
+    authenticatedFetch(`/api/projects/${encodeURIComponent(projectName)}/files/children?path=${encodeURIComponent(directoryPath)}`),
   transcribe: (formData) =>
     authenticatedFetch('/api/transcribe', {
       method: 'POST',

@@ -57,7 +57,26 @@ const GEMINI_RUNTIME_MESSAGE_TYPES = new Set([
   'session-abort-failed'
 ]);
 
+const GEMINI_TERMINAL_MESSAGE_TYPES = new Set([
+  'gemini-error',
+  'gemini-complete',
+  'session-aborted',
+  'error'
+]);
+
 const normalizeProjectPath = (value = '') => String(value || '').replace(/\\/g, '/').replace(/\/$/, '');
+
+const getActiveRunStorageKey = (projectName, sessionId) =>
+  `gemini_active_run:${projectName || 'none'}:${sessionId || 'new'}`;
+
+const isIgnoredGeminiUserContent = (content) => {
+  const trimmed = String(content || '').trim();
+  return trimmed.length === 0 ||
+    trimmed.startsWith('/') ||
+    trimmed.startsWith('?') ||
+    trimmed.startsWith('<session_context>') ||
+    trimmed.startsWith('<hook_context>');
+};
 
 const isGeminiRuntimeMessage = (message) => {
   if (!message) return false;
@@ -74,6 +93,54 @@ const messageBelongsToProject = (message, project) => {
   // Runtime messages without ownership are unsafe once multiple projects can
   // run concurrently, so do not attach them to whichever project is visible.
   return false;
+};
+
+const getUpstreamHost = (value) => {
+  if (!value) return '';
+  try {
+    return new URL(value).host;
+  } catch {
+    return String(value).replace(/^https?:\/\//, '').replace(/\/$/, '');
+  }
+};
+
+const formatGeminiRuntimeStatus = (statusData, language) => {
+  if (!statusData) return null;
+  if (typeof statusData === 'string') return statusData;
+
+  const upstreamHost = getUpstreamHost(statusData.upstream);
+
+  if (statusData.kind === 'rate_limit') {
+    const attempt = statusData.attempt
+      ? (language === 'zh' ? `（第 ${statusData.attempt} 次）` : ` (attempt ${statusData.attempt})`)
+      : '';
+    const details = [upstreamHost, statusData.statusCode, statusData.status]
+      .filter(Boolean)
+      .join(' · ');
+    const base = language === 'zh'
+      ? `上游限流，正在重试${attempt}`
+      : `Upstream rate limited, retrying${attempt}`;
+    return details ? `${base} · ${details}` : base;
+  }
+
+  if (statusData.kind === 'auth_error') {
+    const details = [statusData.status || 'invalid_grant', upstreamHost]
+      .filter(Boolean)
+      .join(' · ');
+    const base = language === 'zh' ? '认证失败' : 'Authentication failed';
+    return details ? `${base} · ${details}` : base;
+  }
+
+  if (statusData.kind === 'retry') {
+    const attempt = statusData.attempt || '?';
+    const details = [upstreamHost, statusData.statusCode].filter(Boolean).join(' · ');
+    const base = language === 'zh'
+      ? `请求失败，正在重试（第 ${attempt} 次）`
+      : `Request failed, retrying (attempt ${attempt})`;
+    return details ? `${base} · ${details}` : base;
+  }
+
+  return statusData.message || statusData.status || null;
 };
 
 // Memoized message component to prevent unnecessary re-renders
@@ -526,7 +593,8 @@ const AttachmentPreview = ({ file, onRemove, error }) => {
 function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, messages, onFileOpen, onInputFocusChange, onSessionActive, onSessionInactive, onReplaceTemporarySession, onNavigateToSession, onShowSettings, showRawParameters, autoScrollToBottom }) {
   const { t, language } = useLanguage();
   const processedIndexStorageKey = `gemini_processed_index:${selectedProject?.name || 'none'}`;
-  const activeRunStorageKey = `gemini_active_run:${selectedProject?.name || 'none'}`;
+  const activeRunStorageKey = getActiveRunStorageKey(selectedProject?.name, selectedSession?.id || 'new');
+  const legacyProjectRunStorageKey = `gemini_active_run:${selectedProject?.name || 'none'}`;
   const pendingSessionStorageKey = `pendingSessionId:${selectedProject?.name || 'none'}`;
   const [input, setInput] = useState(() => {
     if (typeof window !== 'undefined' && selectedProject) {
@@ -543,6 +611,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   });
   const [isLoading, setIsLoading] = useState(() => !!sessionStorage.getItem(activeRunStorageKey));
   const [currentSessionId, setCurrentSessionId] = useState(null);
+  const [currentSessionResumable, setCurrentSessionResumable] = useState(true);
   const [currentRunId, setCurrentRunId] = useState(() => sessionStorage.getItem(activeRunStorageKey));
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [sessionMessages, setSessionMessages] = useState([]);
@@ -564,6 +633,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   const [canAbortSession, setCanAbortSession] = useState(() => !!sessionStorage.getItem(activeRunStorageKey));
   const [isUserScrolledUp, setIsUserScrolledUp] = useState(false);
   const scrollPositionRef = useRef({ height: 0, top: 0 });
+  const isSelectingTextRef = useRef(false);
   const [showCommandMenu, setShowCommandMenu] = useState(false);
   const [slashCommands, setSlashCommands] = useState([]);
   const [filteredCommands, setFilteredCommands] = useState([]);
@@ -576,6 +646,68 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   const [thinkingLevel, setThinkingLevel] = useState('HIGH');
   const [elapsedTime, setElapsedTime] = useState(0);
   const [animationPhase, setAnimationPhase] = useState(0);
+  const finishedRunIdsRef = useRef(new Set());
+
+  useEffect(() => {
+    const storedRunId = sessionStorage.getItem(activeRunStorageKey);
+    setCurrentRunId(storedRunId);
+    setIsLoading(!!storedRunId);
+    setCanAbortSession(!!storedRunId);
+    if (!storedRunId) setGeminiStatus(null);
+
+    // This was the pre-migration project-wide key. Keeping it would make every
+    // session under the project appear active after switching conversations.
+    sessionStorage.removeItem(legacyProjectRunStorageKey);
+  }, [activeRunStorageKey, legacyProjectRunStorageKey]);
+
+  const migrateRunStateToSession = useCallback((sessionId, runId = null, removeSource = false) => {
+    const effectiveRunId = runId || currentRunId || sessionStorage.getItem(activeRunStorageKey);
+    if (!selectedProject?.name || !sessionId || !effectiveRunId) return;
+
+    const targetKey = getActiveRunStorageKey(selectedProject.name, sessionId);
+    sessionStorage.setItem(targetKey, effectiveRunId);
+    if (removeSource && targetKey !== activeRunStorageKey) {
+      sessionStorage.removeItem(activeRunStorageKey);
+    }
+  }, [activeRunStorageKey, currentRunId, selectedProject?.name]);
+
+  const clearRunState = useCallback(({ sessionId = null, runId = null } = {}) => {
+    const storedRunId = sessionStorage.getItem(activeRunStorageKey);
+    const effectiveRunId = runId || currentRunId || storedRunId;
+
+    if (effectiveRunId && finishedRunIdsRef.current.has(effectiveRunId)) {
+      return;
+    }
+    if (effectiveRunId) {
+      finishedRunIdsRef.current.add(effectiveRunId);
+    }
+
+    setIsLoading(false);
+    setCanAbortSession(false);
+    setGeminiStatus(null);
+    sessionStorage.removeItem(activeRunStorageKey);
+
+    if (selectedProject?.name && effectiveRunId) {
+      const prefix = `gemini_active_run:${selectedProject.name}:`;
+      const keysToRemove = [];
+      for (let i = 0; i < sessionStorage.length; i += 1) {
+        const key = sessionStorage.key(i);
+        if (key?.startsWith(prefix) && sessionStorage.getItem(key) === effectiveRunId) {
+          keysToRemove.push(key);
+        }
+      }
+      keysToRemove.forEach(key => sessionStorage.removeItem(key));
+    }
+
+    if (onSessionInactive && effectiveRunId) {
+      onSessionInactive(
+        selectedProject?.name,
+        sessionId || currentSessionId,
+        effectiveRunId
+      );
+    }
+    setCurrentRunId(null);
+  }, [activeRunStorageKey, currentRunId, currentSessionId, onSessionInactive, selectedProject?.name]);
 
   // Update elapsed time every second while loading
   useEffect(() => {
@@ -592,6 +724,52 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
 
     return () => clearInterval(timer);
   }, [isLoading]);
+
+  // The socket that launched a run may disconnect before the CLI exits. In
+  // that case its terminal event is lost, while sessionStorage still says the
+  // run is active. Reconcile against the server-side process registry so the
+  // UI cannot remain stuck in "Processing" forever.
+  useEffect(() => {
+    if (!isLoading) return;
+
+    const runId = currentRunId || sessionStorage.getItem(activeRunStorageKey);
+    if (!runId) return;
+
+    let cancelled = false;
+    const verifyRun = async () => {
+      try {
+        const response = await api.getGeminiRunStatus(runId);
+        if (!response.ok) return;
+        const status = await response.json();
+        if (!cancelled && status.active === false) {
+          clearRunState({
+            sessionId: status.sessionId || currentSessionId,
+            runId
+          });
+        } else if (!cancelled && status.active === true && status.runtimeStatus) {
+          const runtimeText = formatGeminiRuntimeStatus(status.runtimeStatus, language);
+          if (runtimeText) {
+            setGeminiStatus({
+              ...status.runtimeStatus,
+              text: runtimeText,
+              can_interrupt: status.runtimeStatus.can_interrupt !== false
+            });
+          }
+        }
+      } catch (_) {
+        // A failed status request is not evidence that Gemini has stopped.
+      }
+    };
+
+    const initialTimer = setTimeout(verifyRun, 1200);
+    const interval = setInterval(verifyRun, 3000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
+  }, [isLoading, currentRunId, activeRunStorageKey, currentSessionId, clearRunState, language]);
 
   // Animate the status indicator phase
   useEffect(() => {
@@ -824,9 +1002,36 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     return convertSessionMessages(sessionMessages);
   }, [sessionMessages]);
 
+  const shouldPauseAutoScrollForSelection = useCallback(() => {
+    if (isSelectingTextRef.current) return true;
+    if (typeof window === 'undefined' || typeof window.getSelection !== 'function') return false;
+
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !selection.toString()) return false;
+
+    const container = scrollContainerRef.current;
+    if (!container) return false;
+
+    const isNodeInsideContainer = (node) => {
+      if (!node) return false;
+      const element = node.nodeType === 3 ? node.parentElement : node;
+      return !!element && container.contains(element);
+    };
+
+    return isNodeInsideContainer(selection.anchorNode) || isNodeInsideContainer(selection.focusNode);
+  }, []);
+
   // Define scroll functions early to avoid hoisting issues in useEffect dependencies
   const scrollToBottom = useCallback((instant = false) => {
     if (scrollContainerRef.current) {
+      // Never move the chat viewport while the user is selecting/copying text.
+      // Streaming updates can otherwise change scrollTop in the middle of a
+      // drag gesture and collapse or jump the browser selection range.
+      if (shouldPauseAutoScrollForSelection()) {
+        setIsUserScrolledUp(true);
+        return;
+      }
+
       if (instant) {
         scrollContainerRef.current.classList.add('scroll-instant');
         scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
@@ -839,7 +1044,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
       }
       setIsUserScrolledUp(false);
     }
-  }, []);
+  }, [shouldPauseAutoScrollForSelection]);
 
   // Check if user is near the bottom of the scroll container
   const isNearBottom = useCallback(() => {
@@ -871,6 +1076,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           // console.log('Loading messages for session:', selectedSession.id, 'previous:', previousSessionIdRef.current);
           previousSessionIdRef.current = selectedSession.id;
           setCurrentSessionId(selectedSession.id);
+          setCurrentSessionResumable(selectedSession.resumable !== false);
           
           // Only load messages from API if this is a user-initiated session change
           // For system-initiated changes, preserve existing messages and rely on WebSocket
@@ -902,6 +1108,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         setChatMessages([]);
         setSessionMessages([]);
         setCurrentSessionId(null);
+        setCurrentSessionResumable(true);
         previousSessionIdRef.current = null;
       }
     };
@@ -993,8 +1200,17 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
             return;
           }
           if (latestMessage.runId) {
-            setCurrentRunId(latestMessage.runId);
-            sessionStorage.setItem(activeRunStorageKey, latestMessage.runId);
+            const visibleSessionRunId = sessionStorage.getItem(activeRunStorageKey);
+            const isTerminalMessage = GEMINI_TERMINAL_MESSAGE_TYPES.has(latestMessage.type);
+
+            if (visibleSessionRunId !== latestMessage.runId &&
+                (!isTerminalMessage || currentRunId !== latestMessage.runId)) {
+              return;
+            }
+
+            if (!isTerminalMessage) {
+              setCurrentRunId(latestMessage.runId);
+            }
           }
         }
 
@@ -1005,8 +1221,13 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
             setSessionModel(latestMessage.model);
           }
           // Store it temporarily until conversation completes (prevents premature session association)
-          if (latestMessage.sessionId && !currentSessionId) {
+          if (latestMessage.sessionId && (!currentSessionId || !currentSessionResumable)) {
             sessionStorage.setItem(pendingSessionStorageKey, latestMessage.sessionId);
+            migrateRunStateToSession(
+              latestMessage.sessionId,
+              latestMessage.runId || currentRunId,
+              false
+            );
             
             // Session Protection: Replace temporary "new-session-*" identifier with real session ID
             // This maintains protection continuity - no gap between temp ID and real ID
@@ -1019,6 +1240,20 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           
         case 'gemini-response':
           const messageData = latestMessage.data.message || latestMessage.data;
+
+          if (messageData.role === 'user') {
+            const userText = Array.isArray(messageData.content)
+              ? messageData.content
+                  .filter(part => part?.type === 'text' || typeof part?.text === 'string')
+                  .map(part => part?.text || '')
+                  .join('')
+              : typeof messageData.content === 'string'
+                ? messageData.content
+                : '';
+            if (userText && isIgnoredGeminiUserContent(userText)) {
+              return;
+            }
+          }
           
           // Handle Gemini CLI session duplication bug workaround:
           // When resuming a session, Gemini CLI creates a new session instead of resuming.
@@ -1028,12 +1263,18 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
               latestMessage.data.subtype === 'init' && 
               latestMessage.data.session_id && 
               currentSessionId && 
+              currentSessionResumable &&
               latestMessage.data.session_id !== currentSessionId) {
             
             // Debug - Gemini CLI session duplication detected
             
             // Mark this as a system-initiated session change to preserve messages
             setIsSystemSessionChange(true);
+            migrateRunStateToSession(
+              latestMessage.data.session_id,
+              latestMessage.runId || currentRunId,
+              true
+            );
             
             // Switch to the new session using React Router navigation
             // This triggers the session loading logic in App.jsx without a page reload
@@ -1047,12 +1288,17 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           if (latestMessage.data.type === 'system' && 
               latestMessage.data.subtype === 'init' && 
               latestMessage.data.session_id && 
-              !currentSessionId) {
+              (!currentSessionId || !currentSessionResumable)) {
             
             // Debug - New session init detected
             
             // Mark this as a system-initiated session change to preserve messages
             setIsSystemSessionChange(true);
+            migrateRunStateToSession(
+              latestMessage.data.session_id,
+              latestMessage.runId || currentRunId,
+              true
+            );
             
             // Switch to the new session
             if (onNavigateToSession) {
@@ -1066,6 +1312,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
               latestMessage.data.subtype === 'init' && 
               latestMessage.data.session_id && 
               currentSessionId && 
+              currentSessionResumable &&
               latestMessage.data.session_id === currentSessionId) {
             // Debug - System init message for current session, ignoring
             return; // Don't process the message further
@@ -1263,49 +1510,41 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
             content: `Error: ${latestMessage.error || 'Unknown error'}`,
             timestamp: new Date()
           }]);
-          setIsLoading(false);
-          setCanAbortSession(false);
-          setGeminiStatus(null);
-          sessionStorage.removeItem(activeRunStorageKey);
-          if (onSessionInactive) {
-            onSessionInactive(selectedProject?.name, latestMessage.sessionId || currentSessionId, latestMessage.runId || currentRunId);
-          }
-          setCurrentRunId(null);
+          clearRunState({
+            sessionId: latestMessage.sessionId || currentSessionId,
+            runId: latestMessage.runId || currentRunId
+          });
           break;
           
         case 'gemini-complete':
           // console.log('Gemini completed, setting isLoading to false');
-          setIsLoading(false);
-          setCanAbortSession(false);
-          setGeminiStatus(null);
-
           // Play notification sound when response is complete
           playNotificationSound();
           
           // Session Protection: Mark session as inactive to re-enable automatic project updates
           // Conversation is complete, safe to allow project updates again
           // Use real session ID if available, otherwise use pending session ID
-          const activeSessionId = currentSessionId || sessionStorage.getItem(pendingSessionStorageKey);
-          if (onSessionInactive) {
-            onSessionInactive(selectedProject?.name, latestMessage.sessionId || activeSessionId, latestMessage.runId || currentRunId);
-          }
-          
-          // If we have a pending session ID and the conversation completed successfully, use it
+          const activeSessionId = currentSessionResumable ? currentSessionId : null;
           const pendingSessionId = sessionStorage.getItem(pendingSessionStorageKey);
-          if (pendingSessionId && !currentSessionId && latestMessage.exitCode === 0) {
-                setCurrentSessionId(pendingSessionId);
+          clearRunState({
+            sessionId: latestMessage.sessionId || activeSessionId || pendingSessionId,
+            runId: latestMessage.runId || currentRunId
+          });
+
+          // If a legacy-only history was opened, this run deliberately started a
+          // fresh native conversation. Promote the native id once creation succeeds.
+          if (pendingSessionId && (!currentSessionId || !currentSessionResumable) && latestMessage.exitCode === 0) {
+            setCurrentSessionId(pendingSessionId);
+            setCurrentSessionResumable(true);
             sessionStorage.removeItem(pendingSessionStorageKey);
           }
-          sessionStorage.removeItem(activeRunStorageKey);
-          setCurrentRunId(null);
-          
           // Clear persisted chat messages after successful completion
           if (selectedProject && latestMessage.exitCode === 0) {
             localStorage.removeItem(`chat_messages_${selectedProject.name}`);
           }
 
           // Auto sync session messages from backend on completion for guaranteed consistency
-          const finalSessionId = currentSessionId || pendingSessionId;
+          const finalSessionId = activeSessionId || pendingSessionId;
           if (finalSessionId && selectedProject && latestMessage.exitCode === 0) {
             setTimeout(() => {
               loadSessionMessages(selectedProject.name, finalSessionId).catch(() => {});
@@ -1314,17 +1553,10 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           break;
 
           case 'session-aborted':
-          setIsLoading(false);
-          setCanAbortSession(false);
-          setGeminiStatus(null);
-
-          // Session Protection: Mark session as inactive when aborted
-          // User or system aborted the conversation, re-enable project updates
-          if (onSessionInactive) {
-            onSessionInactive(selectedProject?.name, latestMessage.sessionId || currentSessionId, latestMessage.runId || currentRunId);
-          }
-          sessionStorage.removeItem(activeRunStorageKey);
-          setCurrentRunId(null);
+          clearRunState({
+            sessionId: latestMessage.sessionId || currentSessionId,
+            runId: latestMessage.runId || currentRunId
+          });
 
           setChatMessages(prev => [...prev, {
             type: 'system',
@@ -1364,7 +1596,10 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
             };
 
             // Check for different status message formats
-            if (statusData.message) {
+            const runtimeText = formatGeminiRuntimeStatus(statusData, language);
+            if (runtimeText) {
+              statusInfo.text = runtimeText;
+            } else if (statusData.message) {
               statusInfo.text = statusData.message;
             } else if (statusData.status) {
               statusInfo.text = statusData.status;
@@ -1383,6 +1618,11 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
             if (statusData.can_interrupt !== undefined) {
               statusInfo.can_interrupt = statusData.can_interrupt;
             }
+
+            statusInfo.kind = statusData.kind || null;
+            statusInfo.attempt = statusData.attempt || null;
+            statusInfo.statusCode = statusData.statusCode || null;
+            statusInfo.upstream = statusData.upstream || null;
 
             // Debug - Setting claude status
             setGeminiStatus(statusInfo);
@@ -1544,6 +1784,38 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
       return () => scrollContainer.removeEventListener('scroll', handleScroll);
     }
   }, [handleScroll]);
+
+  // Pause programmatic auto-scroll from the moment a primary-button drag
+  // starts inside the message pane. Once the pointer is released, an existing
+  // browser selection is still detected by shouldPauseAutoScrollForSelection,
+  // so the selected text remains stable while the user copies it.
+  useEffect(() => {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) return undefined;
+
+    const handlePointerDown = (event) => {
+      if (event.button !== 0) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest('button, input, textarea, select, [role="button"]')) {
+        return;
+      }
+      isSelectingTextRef.current = true;
+    };
+
+    const handlePointerUp = () => {
+      isSelectingTextRef.current = false;
+    };
+
+    scrollContainer.addEventListener('pointerdown', handlePointerDown, true);
+    window.addEventListener('pointerup', handlePointerUp, true);
+    window.addEventListener('pointercancel', handlePointerUp, true);
+
+    return () => {
+      scrollContainer.removeEventListener('pointerdown', handlePointerDown, true);
+      window.removeEventListener('pointerup', handlePointerUp, true);
+      window.removeEventListener('pointercancel', handlePointerUp, true);
+    };
+  }, []);
 
   // Initial textarea setup
   useEffect(() => {
@@ -1717,6 +1989,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     };
 
     setChatMessages(prev => [...prev, userMessage]);
+    finishedRunIdsRef.current.delete(runId);
     setCurrentRunId(runId);
     sessionStorage.setItem(activeRunStorageKey, runId);
     // console.log('Setting isLoading to true after sending message');
@@ -1738,7 +2011,8 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     // 1. Existing sessions: Use the real currentSessionId
     // 2. New sessions: Use this project's stable run ID until Gemini reports the real session ID
     // This ensures no gap in protection between message send and session creation
-    const sessionToActivate = currentSessionId || `run:${runId}`;
+    const resumeSessionId = currentSessionResumable ? currentSessionId : null;
+    const sessionToActivate = resumeSessionId || `run:${runId}`;
     if (onSessionActive) {
       onSessionActive(selectedProject.name, sessionToActivate);
     }
@@ -1752,21 +2026,14 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         projectName: selectedProject.name,
         projectPath: selectedProject.path,
         cwd: selectedProject.path,
-        sessionId: currentSessionId,
-        resume: !!currentSessionId,
+        sessionId: resumeSessionId,
+        resume: !!resumeSessionId,
         attachments: uploadedAttachments.map(({ data, ...attachment }) => attachment)
       }
     });
 
     if (sent === false) {
-      setIsLoading(false);
-      setCanAbortSession(false);
-      setGeminiStatus(null);
-      sessionStorage.removeItem(activeRunStorageKey);
-      setCurrentRunId(null);
-      if (onSessionInactive) {
-        onSessionInactive(selectedProject.name, currentSessionId, runId);
-      }
+      clearRunState({ sessionId: resumeSessionId || currentSessionId, runId });
       setChatMessages(prev => [...prev, {
         type: 'error',
         content: language === 'zh' ? '网络连接尚未就绪，请等待连接建立后重试' : 'WebSocket connection is not ready. Please wait and try again.',
@@ -1929,7 +2196,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
 
     const sent = sendMessage({
       type: 'abort-session',
-      sessionId: currentSessionId || selectedSession?.id,
+      sessionId: currentSessionResumable ? (currentSessionId || selectedSession?.id) : null,
       runId: currentRunId,
       projectName: selectedProject?.name,
       projectPath: selectedProject?.path

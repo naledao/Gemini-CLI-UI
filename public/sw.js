@@ -1,6 +1,6 @@
 // Service Worker for Gemini CLI UI PWA
 // Keep index.html synchronized with Vite's content-hashed asset filenames.
-const CACHE_NAME = 'gemini-ui-v2';
+const CACHE_NAME = 'gemini-ui-v3-filetree-tooltip';
 const OFFLINE_URL = '/index.html';
 const urlsToCache = [
   OFFLINE_URL,

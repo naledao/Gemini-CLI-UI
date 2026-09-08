@@ -36,7 +36,7 @@ is_our_process() {
   local cmdline
   cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
   case "$cmdline" in
-    *"$BIN_FILE"*|*"/caxa/applications/gemini-cli-ui/"*"/server/index.js"*)
+    *"$BIN_FILE"*|*"/caxa/applications/gemini-cli-ui"*"/server/index.js"*)
       return 0
       ;;
   esac
@@ -65,7 +65,7 @@ get_pid() {
 
   # Fallback check by process name
   local running_pids
-  running_pids="$(pgrep -f "$BIN_FILE|/caxa/applications/gemini-cli-ui/.*/server/index.js" 2>/dev/null || true)"
+  running_pids="$(pgrep -f "$BIN_FILE|/caxa/applications/gemini-cli-ui[^/]*/.*/server/index.js" 2>/dev/null || true)"
   if [ -n "$running_pids" ]; then
     while IFS= read -r p; do
       if [ -n "$p" ] && is_our_process "$p"; then
@@ -162,7 +162,7 @@ stop() {
     echo "Force stopping (SIGKILL)..."
     kill -9 "$pid" 2>/dev/null || true
     pkill -9 -f "$BIN_FILE" 2>/dev/null || true
-    pkill -9 -f '/caxa/applications/gemini-cli-ui/.*/server/index.js' 2>/dev/null || true
+    pkill -9 -f '/caxa/applications/gemini-cli-ui[^/]*/.*/server/index.js' 2>/dev/null || true
   fi
 
   # A caxa launcher may already have exited while its extracted Node child is

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -62,7 +63,7 @@ const CodeBlock = ({ language, value, isDarkMode }) => {
       </div>
 
       {/* Code body */}
-      <div className="relative overflow-x-auto">
+      <div className="code-scroll-container relative overflow-x-auto overflow-y-hidden">
         <SyntaxHighlighter
           language={detectedLanguage || 'text'}
           style={isDarkMode ? oneDark : oneLight}
@@ -73,10 +74,13 @@ const CodeBlock = ({ language, value, isDarkMode }) => {
             fontSize: '0.8125rem',
             lineHeight: '1.6',
             fontFamily: 'JetBrains Mono, Consolas, Monaco, monospace',
+            overflowX: 'visible',
+            width: 'max-content',
+            minWidth: '100%',
           }}
           showLineNumbers={value.includes('\n') && value.split('\n').length > 5}
-          wrapLines={true}
-          wrapLongLines={true}
+          wrapLines={false}
+          wrapLongLines={false}
           lineNumberStyle={{
             minWidth: '2.5em',
             paddingRight: '1em',
@@ -91,24 +95,42 @@ const CodeBlock = ({ language, value, isDarkMode }) => {
   );
 };
 
-// Normalize Markdown emphasis syntax: safely move any inner whitespace to outer side
-// to strictly conform to CommonMark flanking delimiter rules without corrupting emphasis
+// Gemini occasionally emits emphasis with whitespace directly inside the
+// delimiters, for example `** text **` or `** `inline code` **`. CommonMark
+// intentionally does not parse those as emphasis. Normalize only text outside
+// fenced code blocks so rich inline content (including inline code) can still
+// participate in emphasis without ever rewriting literal code samples.
 const normalizeMarkdownEmphasis = (text) => {
   if (!text) return '';
-  const parts = text.split(/(```[\s\S]*?```|`[^`]*?`)/g);
-  return parts.map((part, index) => {
-    // Odd indices are code blocks or inline code - don't modify
-    if (index % 2 === 1) return part;
-    
-    // Fix emphasis inner spaces (e.g. "** text **" -> " **text** ", "**text **" -> "**text** ")
-    return part.replace(/\*\*([^*\n]+?)\*\*/g, (match, inner) => {
+
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  let activeFence = null;
+
+  return lines.map((line) => {
+    const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1];
+      const markerChar = marker[0];
+
+      if (!activeFence) {
+        activeFence = { char: markerChar, length: marker.length };
+      } else if (activeFence.char === markerChar && marker.length >= activeFence.length) {
+        activeFence = null;
+      }
+      return line;
+    }
+
+    if (activeFence) return line;
+
+    return line.replace(/\*\*([^\n]*?)\*\*/g, (match, inner) => {
       const trimmed = inner.trim();
-      if (!trimmed) return match;
-      const leadingSpace = inner.startsWith(' ') ? ' ' : '';
-      const trailingSpace = inner.endsWith(' ') ? ' ' : '';
-      return `${leadingSpace}**${trimmed}**${trailingSpace}`;
+      if (!trimmed || trimmed === inner) return match;
+
+      const leadingWhitespace = inner.match(/^\s+/)?.[0] || '';
+      const trailingWhitespace = inner.match(/\s+$/)?.[0] || '';
+      return `${leadingWhitespace}**${trimmed}**${trailingWhitespace}`;
     });
-  }).join('');
+  }).join('\n');
 };
 
 export const EnhancedMessageRenderer = ({ content, isDarkMode = true }) => {
@@ -122,7 +144,7 @@ export const EnhancedMessageRenderer = ({ content, isDarkMode = true }) => {
   return (
     <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed text-foreground">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkBreaks]}
         components={{
           code: ({ node, className, children, ...props }) => {
             // In case a block code was rendered without pre
@@ -183,6 +205,16 @@ export const EnhancedMessageRenderer = ({ content, isDarkMode = true }) => {
               {children}
             </h4>
           ),
+          h5: ({ children }) => (
+            <h5 className="text-sm font-semibold mt-2.5 mb-1 text-foreground/95">
+              {children}
+            </h5>
+          ),
+          h6: ({ children }) => (
+            <h6 className="text-xs font-semibold uppercase tracking-wide mt-2.5 mb-1 text-muted-foreground">
+              {children}
+            </h6>
+          ),
           p: ({ children }) => {
             if (!children) return null;
             return (
@@ -191,8 +223,8 @@ export const EnhancedMessageRenderer = ({ content, isDarkMode = true }) => {
               </p>
             );
           },
-          ul: ({ children }) => (
-            <ul className="list-disc pl-5 mb-3 space-y-1 text-sm text-foreground/90">
+          ul: ({ children, className }) => (
+            <ul className={`pl-5 mb-3 space-y-1 text-sm text-foreground/90 ${className?.includes('contains-task-list') ? 'list-none' : 'list-disc'}`}>
               {children}
             </ul>
           ),
@@ -201,8 +233,8 @@ export const EnhancedMessageRenderer = ({ content, isDarkMode = true }) => {
               {children}
             </ol>
           ),
-          li: ({ children }) => (
-            <li className="leading-relaxed">
+          li: ({ children, className }) => (
+            <li className={`leading-relaxed ${className?.includes('task-list-item') ? 'list-none flex items-start gap-2' : ''}`}>
               {children}
             </li>
           ),
@@ -244,7 +276,7 @@ export const EnhancedMessageRenderer = ({ content, isDarkMode = true }) => {
             </th>
           ),
           td: ({ children }) => (
-            <td className="px-3 py-2 text-foreground/90">
+            <td className="px-3 py-2 align-top text-foreground/90">
               {children}
             </td>
           ),
@@ -260,6 +292,20 @@ export const EnhancedMessageRenderer = ({ content, isDarkMode = true }) => {
             <em className="italic text-foreground/80">
               {children}
             </em>
+          ),
+          del: ({ children }) => (
+            <del className="text-muted-foreground decoration-muted-foreground/70">
+              {children}
+            </del>
+          ),
+          input: ({ type, checked, ...props }) => (
+            <input
+              {...props}
+              type={type}
+              checked={checked}
+              readOnly
+              className="mt-1 h-3.5 w-3.5 flex-shrink-0 accent-primary"
+            />
           ),
         }}
       >

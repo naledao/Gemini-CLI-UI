@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { ScrollArea } from './ui/scroll-area';
 import { Button } from './ui/button';
 import { Folder, FolderOpen, File, FileText, FileCode, List, TableProperties, Eye, RefreshCw, ChevronDown, ChevronRight, Copy } from 'lucide-react';
@@ -16,6 +17,9 @@ function FileTree({ selectedProject }) {
   const [selectedFile, setSelectedFile] = useState(null);
   const [viewMode, setViewMode] = useState('detailed'); // 'simple', 'detailed', 'compact'
   const [contextMenu, setContextMenu] = useState(null);
+  const [loadingDirs, setLoadingDirs] = useState(new Set());
+  const [directoryErrors, setDirectoryErrors] = useState(new Set());
+  const [nameTooltip, setNameTooltip] = useState(null);
 
   useEffect(() => {
     if (selectedProject) {
@@ -68,6 +72,9 @@ function FileTree({ selectedProject }) {
       
       const data = await response.json();
       setFiles(data);
+      setExpandedDirs(new Set());
+      setLoadingDirs(new Set());
+      setDirectoryErrors(new Set());
       setLastRefresh(Date.now());
     } catch (error) {
       console.error('❌ Error fetching files:', error);
@@ -90,14 +97,114 @@ function FileTree({ selectedProject }) {
     };
   }, [selectedProject]);
 
-  const toggleDirectory = (path) => {
-    const newExpanded = new Set(expandedDirs);
-    if (newExpanded.has(path)) {
-      newExpanded.delete(path);
-    } else {
-      newExpanded.add(path);
+  const updateTreeItem = (items, targetPath, updater) => {
+    return items.map((item) => {
+      if (item.path === targetPath) {
+        return updater(item);
+      }
+      if (item.type === 'directory' && Array.isArray(item.children) && item.children.length > 0) {
+        return { ...item, children: updateTreeItem(item.children, targetPath, updater) };
+      }
+      return item;
+    });
+  };
+
+  const findTreeItem = (items, targetPath) => {
+    for (const item of items) {
+      if (item.path === targetPath) return item;
+      if (item.type === 'directory' && Array.isArray(item.children)) {
+        const found = findTreeItem(item.children, targetPath);
+        if (found) return found;
+      }
     }
-    setExpandedDirs(newExpanded);
+    return null;
+  };
+
+  const loadDirectoryChildren = async (item) => {
+    if (item.childrenLoaded !== false || loadingDirs.has(item.path)) return;
+
+    setLoadingDirs((current) => {
+      const next = new Set(current);
+      next.add(item.path);
+      return next;
+    });
+    setDirectoryErrors((current) => {
+      const next = new Set(current);
+      next.delete(item.path);
+      return next;
+    });
+
+    try {
+      const response = await api.getFileChildren(selectedProject.name, item.path);
+      if (!response.ok) {
+        throw new Error(await response.text() || `HTTP ${response.status}`);
+      }
+
+      const children = await response.json();
+      setFiles((current) => updateTreeItem(current, item.path, (directory) => ({
+        ...directory,
+        children,
+        childrenLoaded: true,
+      })));
+    } catch (error) {
+      console.error('❌ Error loading directory children:', error);
+      setDirectoryErrors((current) => {
+        const next = new Set(current);
+        next.add(item.path);
+        return next;
+      });
+    } finally {
+      setLoadingDirs((current) => {
+        const next = new Set(current);
+        next.delete(item.path);
+        return next;
+      });
+    }
+  };
+
+  const toggleDirectory = (itemOrPath) => {
+    const item = typeof itemOrPath === 'string'
+      ? findTreeItem(files, itemOrPath)
+      : itemOrPath;
+    if (!item) return;
+
+    const path = item.path;
+    const isExpanded = expandedDirs.has(path);
+
+    setExpandedDirs((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+
+    if (!isExpanded && item.childrenLoaded === false) {
+      loadDirectoryChildren(item);
+    }
+  };
+
+  const renderDirectoryState = (item, level) => {
+    let text;
+    if (loadingDirs.has(item.path)) {
+      text = language === 'zh' ? '(加载中...)' : '(loading...)';
+    } else if (directoryErrors.has(item.path)) {
+      text = language === 'zh'
+        ? '(加载失败，收起后重新展开可重试)'
+        : '(load failed; collapse and expand to retry)';
+    } else if (item.childrenLoaded === false) {
+      text = language === 'zh' ? '(尚未加载)' : '(not loaded yet)';
+    } else {
+      text = language === 'zh' ? '(空文件夹)' : '(empty folder)';
+    }
+
+    return (
+      <div
+        className="text-xs text-muted-foreground/60 italic py-1.5 flex items-center gap-1 select-none"
+        style={{ paddingLeft: `${level * 16 + 36}px` }}
+      >
+        <span>{text}</span>
+      </div>
+    );
   };
 
   const openContextMenu = (event, item) => {
@@ -142,6 +249,71 @@ function FileTree({ selectedProject }) {
       setContextMenu(null);
     }
   };
+
+  const showNameTooltipForElement = (element, name) => {
+    const rect = element.getBoundingClientRect();
+    const maxWidth = 420;
+    const margin = 8;
+    const left = Math.min(
+      Math.max(rect.left, margin),
+      Math.max(margin, window.innerWidth - maxWidth - margin)
+    );
+    const top = rect.bottom + 8 <= window.innerHeight - 48
+      ? rect.bottom + 6
+      : Math.max(margin, rect.top - 44);
+
+    setNameTooltip({ name, left, top });
+  };
+
+  const hideNameTooltip = () => setNameTooltip(null);
+
+  useEffect(() => {
+    const getFileNameElement = (node) => {
+      if (!(node instanceof Element)) return null;
+      return node.closest('[data-filetree-name="true"]');
+    };
+
+    const handlePointerOver = (event) => {
+      const target = getFileNameElement(event.target);
+      if (!target) return;
+
+      const previous = getFileNameElement(event.relatedTarget);
+      if (previous === target) return;
+
+      const fullName = target.getAttribute('data-full-name');
+      if (!fullName) return;
+
+      showNameTooltipForElement(target, fullName);
+    };
+
+    const handlePointerOut = (event) => {
+      const target = getFileNameElement(event.target);
+      if (!target) return;
+
+      const next = getFileNameElement(event.relatedTarget);
+      if (next === target) return;
+
+      hideNameTooltip();
+    };
+
+    document.addEventListener('pointerover', handlePointerOver, true);
+    document.addEventListener('pointerout', handlePointerOut, true);
+
+    return () => {
+      document.removeEventListener('pointerover', handlePointerOver, true);
+      document.removeEventListener('pointerout', handlePointerOut, true);
+    };
+  }, []);
+
+  const renderFileName = (item, className) => (
+    <span
+      className={className}
+      data-filetree-name="true"
+      data-full-name={item.name}
+    >
+      {item.name}
+    </span>
+  );
 
   // Change view mode and save preference
   const changeViewMode = (mode) => {
@@ -216,24 +388,17 @@ function FileTree({ selectedProject }) {
             ) : (
               getFileIcon(item.name)
             )}
-            <span className="text-sm truncate text-foreground">
-              {item.name}
-            </span>
+            {renderFileName(item, 'text-sm truncate text-foreground')}
           </div>
         </Button>
         
         {item.type === 'directory' && expandedDirs.has(item.path) && (
-          item.children && item.children.length > 0 ? (
+          Array.isArray(item.children) && item.children.length > 0 ? (
             <div>
               {renderFileTree(item.children, level + 1)}
             </div>
           ) : (
-            <div
-              className="text-xs text-muted-foreground/60 italic py-1.5 flex items-center gap-1 select-none"
-              style={{ paddingLeft: `${level * 16 + 36}px` }}
-            >
-              <span>{language === 'zh' ? '(空文件夹)' : '(empty folder)'}</span>
-            </div>
+            renderDirectoryState(item, level)
           )
         )}
       </div>
@@ -302,9 +467,7 @@ function FileTree({ selectedProject }) {
             ) : (
               getFileIcon(item.name)
             )}
-            <span className="text-sm truncate text-foreground font-medium">
-              {item.name}
-            </span>
+            {renderFileName(item, 'text-sm truncate text-foreground font-medium')}
           </div>
           <div className="col-span-2 text-sm text-muted-foreground">
             {item.type === 'file' 
@@ -320,15 +483,10 @@ function FileTree({ selectedProject }) {
         </div>
         
         {item.type === 'directory' && expandedDirs.has(item.path) && (
-          item.children && item.children.length > 0 ? (
+          Array.isArray(item.children) && item.children.length > 0 ? (
             renderDetailedView(item.children, level + 1)
           ) : (
-            <div
-              className="text-xs text-muted-foreground/60 italic py-1.5 flex items-center gap-1 select-none"
-              style={{ paddingLeft: `${level * 16 + 36}px` }}
-            >
-              <span>{language === 'zh' ? '(空文件夹)' : '(empty folder)'}</span>
-            </div>
+            renderDirectoryState(item, level)
           )
         )}
       </div>
@@ -379,9 +537,7 @@ function FileTree({ selectedProject }) {
             ) : (
               getFileIcon(item.name)
             )}
-            <span className="text-sm truncate text-foreground font-medium">
-              {item.name}
-            </span>
+            {renderFileName(item, 'text-sm truncate text-foreground font-medium')}
           </div>
           <div className="flex items-center gap-3 text-xs text-muted-foreground">
             {item.type === 'file' ? (
@@ -396,15 +552,10 @@ function FileTree({ selectedProject }) {
         </div>
         
         {item.type === 'directory' && expandedDirs.has(item.path) && (
-          item.children && item.children.length > 0 ? (
+          Array.isArray(item.children) && item.children.length > 0 ? (
             renderCompactView(item.children, level + 1)
           ) : (
-            <div
-              className="text-xs text-muted-foreground/60 italic py-1.5 flex items-center gap-1 select-none"
-              style={{ paddingLeft: `${level * 16 + 36}px` }}
-            >
-              <span>{language === 'zh' ? '(空文件夹)' : '(empty folder)'}</span>
-            </div>
+            renderDirectoryState(item, level)
           )
         )}
       </div>
@@ -516,6 +667,33 @@ function FileTree({ selectedProject }) {
             <span>{language === 'zh' ? '复制完整路径' : 'Copy full path'}</span>
           </button>
         </div>
+      )}
+
+      {nameTooltip && typeof document !== 'undefined' && createPortal(
+        <div
+          data-filetree-tooltip="true"
+          role="tooltip"
+          style={{
+            position: 'fixed',
+            left: `${nameTooltip.left}px`,
+            top: `${nameTooltip.top}px`,
+            zIndex: 2147483647,
+            pointerEvents: 'none',
+            background: '#0f172a',
+            color: '#ffffff',
+            padding: '6px 10px',
+            borderRadius: '6px',
+            boxShadow: '0 10px 25px rgba(0, 0, 0, 0.35)',
+            maxWidth: '420px',
+            whiteSpace: 'normal',
+            wordBreak: 'break-all',
+            fontSize: '12px',
+            lineHeight: '18px'
+          }}
+        >
+          {nameTooltip.name}
+        </div>,
+        document.body
       )}
       
       {/* Unified File Viewer Modal */}

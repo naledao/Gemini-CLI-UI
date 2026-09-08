@@ -2,6 +2,9 @@ import { promises as fs } from 'fs';
 import fsSync from 'fs';
 import path from 'path';
 import readline from 'readline';
+import { getSystemHomeDirectory } from './system-home.js';
+
+const systemHome = getSystemHomeDirectory();
 
 // Cache for extracted project directories
 const projectDirectoryCache = new Map();
@@ -15,7 +18,7 @@ function clearProjectDirectoryCache() {
 
 // Load project configuration file
 async function loadProjectConfig() {
-  const configPath = path.join(process.env.HOME, '.gemini', 'project-config.json');
+  const configPath = path.join(systemHome, '.gemini', 'project-config.json');
   try {
     const configData = await fs.readFile(configPath, 'utf8');
     return JSON.parse(configData);
@@ -27,8 +30,326 @@ async function loadProjectConfig() {
 
 // Save project configuration file
 async function saveProjectConfig(config) {
-  const configPath = path.join(process.env.HOME, '.gemini', 'project-config.json');
+  const configPath = path.join(systemHome, '.gemini', 'project-config.json');
   await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
+}
+
+const nativeProjectsRegistryPath = path.join(systemHome, '.gemini', 'projects.json');
+const nativeTempRoot = path.join(systemHome, '.gemini', 'tmp');
+const legacyUiSessionsDir = path.join(systemHome, '.gemini', 'sessions');
+
+function normalizeRegistryPath(value) {
+  if (!value) return '';
+  const resolved = path.resolve(value);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+async function loadNativeProjectRegistry() {
+  try {
+    const data = JSON.parse(await fs.readFile(nativeProjectsRegistryPath, 'utf8'));
+    return data && typeof data.projects === 'object' && data.projects ? data.projects : {};
+  } catch {
+    return {};
+  }
+}
+
+async function getNativeProjectSlug(projectPath) {
+  if (!projectPath) return null;
+  const registry = await loadNativeProjectRegistry();
+  const target = normalizeRegistryPath(projectPath);
+
+  for (const [registeredPath, slug] of Object.entries(registry)) {
+    if (normalizeRegistryPath(registeredPath) === target && typeof slug === 'string' && slug) {
+      return slug;
+    }
+  }
+
+  try {
+    const entries = await fs.readdir(nativeTempRoot, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      try {
+        const marker = (await fs.readFile(path.join(nativeTempRoot, entry.name, '.project_root'), 'utf8')).trim();
+        if (normalizeRegistryPath(marker) === target) return entry.name;
+      } catch {
+        // Not every temp directory has an ownership marker.
+      }
+    }
+  } catch {
+    // The native temp root does not exist until Gemini has used a project.
+  }
+
+  return null;
+}
+
+async function getNativeChatsDir(projectPath) {
+  const slug = await getNativeProjectSlug(projectPath);
+  return slug ? path.join(nativeTempRoot, slug, 'chats') : null;
+}
+
+function nativeContentToText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.map(part => {
+    if (typeof part === 'string') return part;
+    return part && typeof part.text === 'string' ? part.text : '';
+  }).join('');
+}
+
+// Keep this aligned with Gemini CLI's isIgnoredUserContent(). Native chat
+// snapshots include synthetic user turns that initialize CLI context; those
+// are not real user prompts and must never become UI messages or titles.
+function isIgnoredNativeUserContent(content) {
+  const trimmed = String(content || '').trim();
+  return trimmed.length === 0 ||
+    trimmed.startsWith('/') ||
+    trimmed.startsWith('?') ||
+    trimmed.startsWith('<session_context>') ||
+    trimmed.startsWith('<hook_context>');
+}
+
+function isNativeDisplayMessage(message) {
+  if (!message || typeof message !== 'object') return false;
+  const text = nativeContentToText(message.content);
+  if (message.type === 'user') return !isIgnoredNativeUserContent(text);
+  if (message.type === 'gemini') return text.trim().length > 0;
+  return false;
+}
+
+function isNativeMessageRecord(record) {
+  return !!record && typeof record === 'object' && typeof record.id === 'string';
+}
+
+function hasNativeResumableContent(messages) {
+  return messages.some(message => {
+    const text = nativeContentToText(message.content).trim();
+    if (message.type === 'user') {
+      return !isIgnoredNativeUserContent(text);
+    }
+    if (message.type === 'gemini') {
+      return text.length > 0 || (Array.isArray(message.toolCalls) && message.toolCalls.length > 0) ||
+        (Array.isArray(message.thoughts) && message.thoughts.length > 0);
+    }
+    return false;
+  });
+}
+
+async function loadNativeConversationRecord(filePath) {
+  try {
+    const content = await fs.readFile(filePath, 'utf8');
+
+    if (filePath.endsWith('.json') && !filePath.endsWith('.jsonl')) {
+      const data = JSON.parse(content);
+      if (!data || typeof data !== 'object' || !data.sessionId) return null;
+      return { ...data, messages: Array.isArray(data.messages) ? data.messages : [] };
+    }
+
+    let metadata = {};
+    const messages = new Map();
+
+    for (const line of content.split('\n')) {
+      if (!line.trim()) continue;
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+
+      if (record && typeof record.$rewindTo === 'string') {
+        let found = false;
+        const idsToDelete = [];
+        for (const id of messages.keys()) {
+          if (id === record.$rewindTo) found = true;
+          if (found) idsToDelete.push(id);
+        }
+        if (found) idsToDelete.forEach(id => messages.delete(id));
+        else messages.clear();
+        continue;
+      }
+
+      if (isNativeMessageRecord(record)) {
+        // Native JSONL can repeat an id as streamed output is enriched. The
+        // current Gemini loader uses last-record-wins semantics for that id.
+        messages.set(record.id, record);
+        continue;
+      }
+
+      if (record && record.$set && typeof record.$set === 'object') {
+        if (Array.isArray(record.$set.messages)) {
+          messages.clear();
+          for (const message of record.$set.messages) {
+            if (isNativeMessageRecord(message)) messages.set(message.id, message);
+          }
+        }
+        metadata = { ...metadata, ...record.$set };
+        continue;
+      }
+
+      if (record && typeof record.sessionId === 'string' && typeof record.projectHash === 'string') {
+        metadata = { ...metadata, ...record };
+        if (Array.isArray(record.messages)) {
+          for (const message of record.messages) {
+            if (isNativeMessageRecord(message)) messages.set(message.id, message);
+          }
+        }
+      }
+    }
+
+    if (!metadata.sessionId || !metadata.projectHash) return null;
+    return { ...metadata, messages: Array.from(messages.values()) };
+  } catch {
+    return null;
+  }
+}
+
+function nativeRecordToUiMessages(record) {
+  if (!record || !Array.isArray(record.messages)) return [];
+  const result = [];
+
+  for (const message of record.messages) {
+    if (!isNativeDisplayMessage(message)) continue;
+    const text = nativeContentToText(message.content);
+    result.push({
+      sessionId: record.sessionId,
+      timestamp: message.timestamp || record.lastUpdated || record.startTime,
+      type: 'message',
+      source: 'native',
+      message: {
+        role: message.type === 'gemini' ? 'assistant' : 'user',
+        content: text
+      }
+    });
+  }
+
+  return result;
+}
+
+async function loadNativeSessionsForProject(projectPath) {
+  const chatsDir = await getNativeChatsDir(projectPath);
+  if (!chatsDir) return [];
+
+  let files;
+  try {
+    files = (await fs.readdir(chatsDir)).filter(file =>
+      file.startsWith('session-') && (file.endsWith('.jsonl') || file.endsWith('.json'))
+    );
+  } catch {
+    return [];
+  }
+
+  const sessionsById = new Map();
+  for (const file of files) {
+    const filePath = path.join(chatsDir, file);
+    const record = await loadNativeConversationRecord(filePath);
+    if (!record?.sessionId || !hasNativeResumableContent(record.messages || [])) continue;
+
+    let stat;
+    try {
+      stat = await fs.stat(filePath);
+    } catch {
+      stat = null;
+    }
+
+    const firstUserMessage = (record.messages || []).find(message =>
+      message.type === 'user' && !isIgnoredNativeUserContent(nativeContentToText(message.content))
+    );
+    const metadataFirstUserText = String(record.firstUserMessage || '').trim();
+    const firstUserText = metadataFirstUserText && !isIgnoredNativeUserContent(metadataFirstUserText)
+      ? metadataFirstUserText
+      : nativeContentToText(firstUserMessage?.content).trim();
+    const lastMessageTimestamp = [...(record.messages || [])].reverse().find(message => message.timestamp)?.timestamp;
+    const lastActivity = record.lastUpdated || lastMessageTimestamp || stat?.mtime?.toISOString() || record.startTime || new Date(0).toISOString();
+    const metadataSummary = String(record.summary || '').trim();
+    const summaryText = metadataSummary && !isIgnoredNativeUserContent(metadataSummary)
+      ? metadataSummary
+      : firstUserText || 'New Session';
+
+    const session = {
+      id: record.sessionId,
+      summary: summaryText.length > 50 ? `${summaryText.slice(0, 50)}...` : summaryText,
+      messageCount: (record.messages || []).filter(isNativeDisplayMessage).length,
+      lastActivity,
+      cwd: projectPath,
+      source: 'native',
+      resumable: true,
+      nativeFile: file
+    };
+
+    const existing = sessionsById.get(session.id);
+    if (!existing || new Date(session.lastActivity) > new Date(existing.lastActivity)) {
+      sessionsById.set(session.id, session);
+    }
+  }
+
+  return Array.from(sessionsById.values());
+}
+
+async function loadLegacyUiSessionsForProject(projectPath) {
+  let files;
+  try {
+    files = (await fs.readdir(legacyUiSessionsDir)).filter(file => file.endsWith('.json'));
+  } catch {
+    return [];
+  }
+
+  const targetPath = normalizeRegistryPath(projectPath);
+  const sessions = [];
+  for (const file of files) {
+    try {
+      const data = JSON.parse(await fs.readFile(path.join(legacyUiSessionsDir, file), 'utf8'));
+      if (!data?.id || normalizeRegistryPath(data.projectPath) !== targetPath) continue;
+      const messages = Array.isArray(data.messages) ? data.messages : [];
+      const firstUserText = String(messages.find(message => message?.role === 'user')?.content || '');
+      sessions.push({
+        id: data.id,
+        summary: firstUserText ? (firstUserText.length > 50 ? `${firstUserText.slice(0, 50)}...` : firstUserText) : 'New Session',
+        messageCount: messages.length,
+        lastActivity: data.lastActivity || data.createdAt || new Date(0).toISOString(),
+        cwd: data.projectPath || projectPath,
+        source: 'legacy',
+        legacyStore: 'sessions',
+        resumable: false
+      });
+    } catch {
+      // Ignore malformed legacy UI session files.
+    }
+  }
+
+  return sessions;
+}
+
+async function getLegacyUiSessionMessages(sessionId) {
+  if (!/^[A-Za-z0-9_-]+$/.test(String(sessionId || ''))) return [];
+  try {
+    const data = JSON.parse(await fs.readFile(path.join(legacyUiSessionsDir, `${sessionId}.json`), 'utf8'));
+    if (data?.id !== sessionId || !Array.isArray(data.messages)) return [];
+    return data.messages.map(message => ({
+      sessionId,
+      timestamp: message.timestamp || data.lastActivity || data.createdAt,
+      type: 'message',
+      source: 'legacy',
+      message: {
+        role: message.role,
+        content: message.content
+      }
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function deleteLegacyUiSession(sessionId) {
+  if (!/^[A-Za-z0-9_-]+$/.test(String(sessionId || ''))) return false;
+  const filePath = path.join(legacyUiSessionsDir, `${sessionId}.json`);
+  try {
+    const data = JSON.parse(await fs.readFile(filePath, 'utf8'));
+    if (data?.id !== sessionId) return false;
+    await fs.rm(filePath, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Generate better display name from path
@@ -84,7 +405,20 @@ async function extractProjectDirectory(projectName) {
     // Continue to session/decoding extraction
   }
 
-  const projectDir = path.join(process.env.HOME, '.gemini', 'projects', projectName);
+  // Current Gemini CLI stores the canonical project path -> slug mapping in
+  // ~/.gemini/projects.json. Prefer it before legacy ~/.gemini/projects data.
+  try {
+    const nativeRegistry = await loadNativeProjectRegistry();
+    const nativeEntry = Object.entries(nativeRegistry).find(([, slug]) => slug === projectName);
+    if (nativeEntry?.[0]) {
+      projectDirectoryCache.set(projectName, nativeEntry[0]);
+      return nativeEntry[0];
+    }
+  } catch {
+    // Continue to legacy extraction below.
+  }
+
+  const projectDir = path.join(systemHome, '.gemini', 'projects', projectName);
   const cwdCounts = new Map();
   let latestTimestamp = 0;
   let latestCwd = null;
@@ -217,7 +551,7 @@ async function extractProjectDirectory(projectName) {
 }
 
 async function getProjects() {
-  const geminiDir = path.join(process.env.HOME, '.gemini', 'projects');
+  const geminiDir = path.join(systemHome, '.gemini', 'projects');
   const config = await loadProjectConfig();
   const projects = [];
   const existingProjects = new Set();
@@ -248,18 +582,14 @@ async function getProjects() {
           sessions: []
         };
         
-        // Try to get sessions for this project (just first 5 for performance)
+        // Native Gemini chats are the primary history source. getSessions()
+        // adds legacy history only when it has no corresponding native session.
         try {
-          // Use sessionManager to get sessions for this project
-          const sessionManager = (await import('./sessionManager.js')).default;
-          const allSessions = sessionManager.getProjectSessions(actualProjectDir);
-          
-          // Paginate the sessions
-          const paginatedSessions = allSessions.slice(0, 5);
-          project.sessions = paginatedSessions;
+          const sessionResult = await getSessions(entry.name, 5, 0);
+          project.sessions = sessionResult.sessions;
           project.sessionMeta = {
-            hasMore: allSessions.length > 5,
-            total: allSessions.length
+            hasMore: sessionResult.hasMore,
+            total: sessionResult.total
           };
         } catch (e) {
           // console.warn(`Could not load sessions for project ${entry.name}:`, e.message);
@@ -304,8 +634,8 @@ async function getProjects() {
   return projects;
 }
 
-async function getSessions(projectName, limit = 5, offset = 0) {
-  const projectDir = path.join(process.env.HOME, '.gemini', 'projects', projectName);
+async function getLegacySessions(projectName, limit = 5, offset = 0) {
+  const projectDir = path.join(systemHome, '.gemini', 'projects', projectName);
   
   try {
     const files = await fs.readdir(projectDir);
@@ -398,7 +728,9 @@ async function parseJsonlSessions(filePath) {
                 summary: 'New Session',
                 messageCount: 0,
                 lastActivity: new Date(),
-                cwd: entry.cwd || ''
+                cwd: entry.cwd || '',
+                source: 'legacy',
+                resumable: false
               });
             }
             
@@ -444,8 +776,8 @@ async function parseJsonlSessions(filePath) {
 }
 
 // Get messages for a specific session
-async function getSessionMessages(projectName, sessionId) {
-  const projectDir = path.join(process.env.HOME, '.gemini', 'projects', projectName);
+async function getLegacySessionMessages(projectName, sessionId) {
+  const projectDir = path.join(systemHome, '.gemini', 'projects', projectName);
   
   try {
     const files = await fs.readdir(projectDir);
@@ -490,6 +822,70 @@ async function getSessionMessages(projectName, sessionId) {
   }
 }
 
+async function getSessions(projectName, limit = 5, offset = 0) {
+  const projectPath = await extractProjectDirectory(projectName);
+  const nativeSessions = await loadNativeSessionsForProject(projectPath);
+  const legacyUiSessions = await loadLegacyUiSessionsForProject(projectPath);
+  const legacyResult = await getLegacySessions(projectName, Number.MAX_SAFE_INTEGER, 0);
+
+  // A legacy UI id can differ from the canonical native UUID while still
+  // referring to the same chat. Native filenames include the canonical UUID's
+  // first 8 characters, so prefer the native record for matching short ids.
+  const nativeIds = new Set(nativeSessions.map(session => session.id));
+  const nativeShortIds = new Set(nativeSessions.map(session => session.id.slice(0, 8)));
+  const legacyUiOnly = legacyUiSessions
+    .filter(session => !nativeIds.has(session.id) && !nativeShortIds.has(session.id.slice(0, 8)))
+    .map(session => ({ ...session, source: 'legacy', resumable: false }));
+  const legacyUiIds = new Set(legacyUiOnly.map(session => session.id));
+  const legacyOnly = legacyResult.sessions
+    .filter(session => !nativeIds.has(session.id) && !nativeShortIds.has(session.id.slice(0, 8)))
+    .filter(session => !legacyUiIds.has(session.id))
+    .map(session => ({ ...session, source: 'legacy', resumable: false }));
+
+  const sortedSessions = [...nativeSessions, ...legacyUiOnly, ...legacyOnly].sort((a, b) =>
+    new Date(b.lastActivity || 0) - new Date(a.lastActivity || 0)
+  );
+  const parsedLimit = Math.max(1, Number(limit) || 5);
+  const parsedOffset = Math.max(0, Number(offset) || 0);
+  const total = sortedSessions.length;
+
+  return {
+    sessions: sortedSessions.slice(parsedOffset, parsedOffset + parsedLimit),
+    hasMore: parsedOffset + parsedLimit < total,
+    total,
+    offset: parsedOffset,
+    limit: parsedLimit
+  };
+}
+
+async function getSessionMessages(projectName, sessionId) {
+  const projectPath = await extractProjectDirectory(projectName);
+  const chatsDir = await getNativeChatsDir(projectPath);
+
+  if (chatsDir && sessionId) {
+    const shortId = sessionId.slice(0, 8);
+    try {
+      const files = (await fs.readdir(chatsDir)).filter(file =>
+        file.startsWith('session-') &&
+        (file.endsWith(`-${shortId}.jsonl`) || file.endsWith(`-${shortId}.json`))
+      );
+      for (const file of files) {
+        const record = await loadNativeConversationRecord(path.join(chatsDir, file));
+        if (record?.sessionId === sessionId) {
+          return nativeRecordToUiMessages(record);
+        }
+      }
+    } catch {
+      // Fall back to legacy history below.
+    }
+  }
+
+  const legacyUiMessages = await getLegacyUiSessionMessages(sessionId);
+  if (legacyUiMessages.length > 0) return legacyUiMessages;
+
+  return getLegacySessionMessages(projectName, sessionId);
+}
+
 // Rename a project's display name
 async function renameProject(projectName, newDisplayName) {
   const config = await loadProjectConfig();
@@ -509,8 +905,8 @@ async function renameProject(projectName, newDisplayName) {
 }
 
 // Delete a session from a project
-async function deleteSession(projectName, sessionId) {
-  const projectDir = path.join(process.env.HOME, '.gemini', 'projects', projectName);
+async function deleteLegacySession(projectName, sessionId) {
+  const projectDir = path.join(systemHome, '.gemini', 'projects', projectName);
   
   try {
     const files = await fs.readdir(projectDir);
@@ -560,6 +956,35 @@ async function deleteSession(projectName, sessionId) {
   }
 }
 
+async function deleteSession(projectName, sessionId) {
+  const projectPath = await extractProjectDirectory(projectName);
+  const chatsDir = await getNativeChatsDir(projectPath);
+
+  if (chatsDir && sessionId) {
+    const shortId = sessionId.slice(0, 8);
+    try {
+      const files = (await fs.readdir(chatsDir)).filter(file =>
+        file.startsWith('session-') &&
+        (file.endsWith(`-${shortId}.jsonl`) || file.endsWith(`-${shortId}.json`))
+      );
+      for (const file of files) {
+        const filePath = path.join(chatsDir, file);
+        const record = await loadNativeConversationRecord(filePath);
+        if (record?.sessionId === sessionId) {
+          await fs.rm(filePath, { force: true });
+          return true;
+        }
+      }
+    } catch {
+      // Fall back to legacy deletion below.
+    }
+  }
+
+  if (await deleteLegacyUiSession(sessionId)) return true;
+
+  return deleteLegacySession(projectName, sessionId);
+}
+
 // Check if a project is empty (has no sessions)
 async function isProjectEmpty(projectName) {
   try {
@@ -573,7 +998,7 @@ async function isProjectEmpty(projectName) {
 
 // Delete an empty project
 async function deleteProject(projectName) {
-  const projectDir = path.join(process.env.HOME, '.gemini', 'projects', projectName);
+  const projectDir = path.join(systemHome, '.gemini', 'projects', projectName);
   
   try {
     // First check if the project is empty
@@ -624,7 +1049,7 @@ async function addProjectManually(projectPath, displayName = null) {
   
   // Check if project already exists in config or as a folder
   const config = await loadProjectConfig();
-  const projectDir = path.join(process.env.HOME, '.gemini', 'projects', projectName);
+  const projectDir = path.join(systemHome, '.gemini', 'projects', projectName);
   
   try {
     await fs.access(projectDir);

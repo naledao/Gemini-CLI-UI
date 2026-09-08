@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { getSystemHomeDirectory } from '../system-home.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -13,7 +14,7 @@ const getDatabasePath = () => {
     return path.resolve(process.env.DATABASE_PATH);
   }
   
-  const homeGeminiDb = path.join(process.env.HOME || '/root', '.gemini', 'geminicliui_auth.db');
+  const homeGeminiDb = path.join(getSystemHomeDirectory(), '.gemini', 'geminicliui_auth.db');
   const localDb = path.join(__dirname, 'geminicliui_auth.db');
   
   if (fs.existsSync(homeGeminiDb)) {

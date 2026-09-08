@@ -1,11 +1,11 @@
 import { spawn } from 'child_process';
 import { promises as fs } from 'fs';
 import path from 'path';
-import os from 'os';
 import { fileURLToPath } from 'url';
 import sessionManager from './sessionManager.js';
 import GeminiResponseHandler from './gemini-response-handler.js';
 import { settingsDb } from './database/db.js';
+import { getSystemHomeDirectory, createSystemUserEnvironment } from './system-home.js';
 
 
 function resolveToolWorkingDirectory(toolName, params, workspaceRoot) {
@@ -35,6 +35,48 @@ function resolveToolWorkingDirectory(toolName, params, workspaceRoot) {
 }
 
 let activeGeminiProcesses = new Map(); // Track active processes by session ID
+
+async function getGeminiUpstreamBaseUrl() {
+  const fromEnv = process.env.GOOGLE_GEMINI_BASE_URL?.trim();
+  if (fromEnv) return fromEnv.replace(/\/$/, '');
+
+  try {
+    const envPath = path.join(getSystemHomeDirectory(), '.gemini', '.env');
+    const content = await fs.readFile(envPath, 'utf8');
+    for (const rawLine of content.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const match = line.match(/^GOOGLE_GEMINI_BASE_URL\s*=\s*(.*)$/);
+      if (!match) continue;
+      const value = match[1].trim().replace(/^['"]|['"]$/g, '');
+      if (value) return value.replace(/\/$/, '');
+    }
+  } catch {
+    // Gemini CLI can still use its default endpoint when no custom gateway is configured.
+  }
+
+  return null;
+}
+
+function getGeminiRunStatus(runId) {
+  if (!runId) {
+    return { active: false, runId: null };
+  }
+
+  const geminiProcess = activeGeminiProcesses.get(runId);
+  if (!geminiProcess) {
+    return { active: false, runId };
+  }
+
+  return {
+    active: geminiProcess.exitCode === null,
+    runId: geminiProcess.runId || runId,
+    sessionId: geminiProcess.capturedSessionId || null,
+    projectName: geminiProcess.projectName || null,
+    projectPath: geminiProcess.projectPath || null,
+    runtimeStatus: geminiProcess.runtimeStatus || null
+  };
+}
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const GEMINI_BINARY_SETTING_KEY = 'gemini_binary_path';
 
@@ -202,7 +244,7 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
       const fsSync = await import('fs'); // Import synchronous fs methods
       
       // Check for MCP config in ~/.gemini.json
-      const geminiConfigPath = path.join(os.homedir(), '.gemini.json');
+      const geminiConfigPath = path.join(getSystemHomeDirectory(), '.gemini.json');
       
       
       let hasMcpServers = false;
@@ -271,6 +313,7 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
     args.push('-o', 'stream-json');
     
     const geminiLaunch = await resolveGeminiLaunch();
+    const upstreamBaseUrl = await getGeminiUpstreamBaseUrl();
     const launchArgs = [...geminiLaunch.prefixArgs, ...args];
     console.log('🚀 Spawning Gemini CLI:', geminiLaunch.displayPath, args.join(' '));
     console.log('📂 Working directory:', workingDir);
@@ -278,7 +321,9 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
     const geminiProcess = spawn(geminiLaunch.command, launchArgs, {
       cwd: workingDir,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env }, // Inherit all environment variables
+      // Inherit the caller environment, but force the real OS account home so
+      // sandbox/launcher temporary HOME values cannot redirect ~/.gemini.
+      env: createSystemUserEnvironment(),
       // On POSIX make Gemini the leader of its own process group. Gemini CLI
       // starts a second Node process internally; without a dedicated group,
       // killing only the wrapper leaves that child orphaned and still working.
@@ -294,20 +339,49 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
     geminiProcess.sessionId = processKey;
     geminiProcess.runId = runId || null;
     geminiProcess.capturedSessionId = capturedSessionId || sessionId || null;
+    geminiProcess.projectName = options.projectName || null;
+    geminiProcess.projectPath = projectPath || cwd || workingDir || null;
+    geminiProcess.runtimeStatus = null;
+
+    const sendRuntimeStatus = (data) => {
+      const status = {
+        can_interrupt: true,
+        timestamp: new Date().toISOString(),
+        ...(upstreamBaseUrl ? { upstream: upstreamBaseUrl } : {}),
+        ...data
+      };
+      geminiProcess.runtimeStatus = status;
+      try {
+        ws.send(JSON.stringify({ type: 'gemini-status', data: status }));
+      } catch (error) {
+        console.warn('Failed to send Gemini runtime status:', error.message);
+      }
+    };
     
     // Close stdin to signal we're done sending input
     geminiProcess.stdin.end();
     
     // Add timeout handler (10 minutes for long analysis tasks, users can click Stop anytime)
     let hasReceivedOutput = false;
+    let terminalEventSent = false;
+    const sendTerminalEvent = (event) => {
+      if (terminalEventSent) return false;
+      terminalEventSent = true;
+      try {
+        ws.send(JSON.stringify(event));
+      } catch (error) {
+        console.warn('Failed to send Gemini terminal event:', error.message);
+      }
+      return true;
+    };
     const timeoutMs = 600000; // 10 minutes
     const timeout = setTimeout(() => {
       if (!hasReceivedOutput) {
         console.error('⏰ Gemini CLI timeout - no output received after', timeoutMs, 'ms');
-        ws.send(JSON.stringify({
+        sendTerminalEvent({
           type: 'gemini-error',
           error: 'Gemini CLI timeout - no response received'
-        }));
+        });
         geminiProcess.kill('SIGTERM');
       }
     }, timeoutMs);
@@ -449,11 +523,64 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
       }
     });
     
-    // Handle stderr - accumulate diagnostic output for logging or error reporting
+    // Handle stderr - accumulate diagnostic output and surface structured runtime status.
     let stderrBuffer = '';
+    let stderrLineBuffer = '';
+    let lastRetryAttempt = 0;
+    const processStderrLine = (rawLine) => {
+      const line = rawLine.trim();
+      if (!line) return;
+
+      const retryMatch = line.match(/Attempt\s+(\d+)\s+failed\s+with\s+status\s+(\d+)\.\s+Retrying\s+with\s+backoff/i);
+      if (retryMatch) {
+        const attempt = Number(retryMatch[1]);
+        const statusCode = Number(retryMatch[2]);
+        lastRetryAttempt = attempt;
+        sendRuntimeStatus(statusCode === 429
+          ? {
+              kind: 'rate_limit',
+              phase: 'retrying',
+              attempt,
+              statusCode,
+              status: 'RESOURCE_EXHAUSTED'
+            }
+          : {
+              kind: 'retry',
+              phase: 'retrying',
+              attempt,
+              statusCode
+            });
+        return;
+      }
+
+      if (/Upstream rate limit exceeded|RESOURCE_EXHAUSTED/i.test(line)) {
+        sendRuntimeStatus({
+          kind: 'rate_limit',
+          phase: 'retrying',
+          attempt: lastRetryAttempt || null,
+          statusCode: 429,
+          status: 'RESOURCE_EXHAUSTED'
+        });
+        return;
+      }
+
+      if (/invalid_grant/i.test(line)) {
+        sendRuntimeStatus({
+          kind: 'auth_error',
+          phase: 'failed',
+          statusCode: 400,
+          status: 'invalid_grant'
+        });
+      }
+    };
+
     geminiProcess.stderr.on('data', (data) => {
       const errorMsg = data.toString();
       stderrBuffer += errorMsg;
+      stderrLineBuffer += errorMsg;
+      const lines = stderrLineBuffer.split(/\r?\n/);
+      stderrLineBuffer = lines.pop() || '';
+      for (const line of lines) processStderrLine(line);
       console.error('Gemini CLI stderr:', errorMsg);
     });
     
@@ -462,6 +589,11 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
       console.log(`Gemini CLI process exited with code ${code}${signal ? ` signal ${signal}` : ''}`);
       clearTimeout(timeout);
       const wasAborted = geminiProcess.abortRequested === true;
+
+      if (stderrLineBuffer.trim()) {
+        processStderrLine(stderrLineBuffer);
+        stderrLineBuffer = '';
+      }
       
       // Flush any remaining content in lineBuffer
       if (lineBuffer && lineBuffer.trim()) {
@@ -498,10 +630,10 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
       
       // If process failed with non-zero code and produced no output, notify client of error
       if (!wasAborted && code !== 0 && !hasReceivedOutput && !fullResponse) {
-        ws.send(JSON.stringify({
+        sendTerminalEvent({
           type: 'gemini-error',
           error: stderrBuffer.trim() || `Gemini CLI process exited with code ${code}`
-        }));
+        });
       }
 
       // abort-session already emitted a scoped session-aborted event. Do not
@@ -509,18 +641,18 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
       if (wasAborted) {
         resolve();
       } else if (code === 0) {
-        ws.send(JSON.stringify({
+        sendTerminalEvent({
           type: 'gemini-complete',
           exitCode: code,
           isNewSession: !sessionId && !!command // Flag to indicate this was a new session
-        }));
+        });
         resolve();
       } else {
-        ws.send(JSON.stringify({
+        sendTerminalEvent({
           type: 'gemini-complete',
           exitCode: code,
           isNewSession: !sessionId && !!command
-        }));
+        });
         reject(new Error(`Gemini CLI exited with code ${code}`));
       }
     });
@@ -536,10 +668,10 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
         activeGeminiProcesses.delete(finalSessionId);
       }
       
-      ws.send(JSON.stringify({
+      sendTerminalEvent({
         type: 'gemini-error',
         error: error.message
-      }));
+      });
       
       reject(error);
     });
@@ -650,5 +782,6 @@ export {
   resolveEmbeddedGeminiPath,
   resolveGeminiLaunch,
   spawnGemini,
-  abortGeminiSession
+  abortGeminiSession,
+  getGeminiRunStatus
 };
