@@ -1,15 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import { Button } from './ui/button';
-import { X, Settings, Moon, Sun, Volume2, Globe, ArrowUpDown, Terminal, FolderOpen, RotateCcw, CheckCircle2, AlertCircle } from 'lucide-react';
+import { X, Settings, Moon, Sun, Volume2, Globe, ArrowUpDown, Terminal, FolderOpen, RotateCcw, CheckCircle2, AlertCircle, ShieldCheck } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import { useLanguage } from '../contexts/LanguageContext';
 import { api } from '../utils/api';
+
+const GEMINI_APPROVAL_MODES = ['default', 'auto_edit', 'plan', 'yolo'];
+
+const normalizeApprovalMode = (mode) =>
+  GEMINI_APPROVAL_MODES.includes(mode) ? mode : 'default';
 
 function ToolsSettings({ isOpen, onClose }) {
   const { isDarkMode, toggleDarkMode } = useTheme();
   const { t, language, setLanguage, supportedLanguages } = useLanguage();
   const [enableNotificationSound, setEnableNotificationSound] = useState(false);
   const [projectSortOrder, setProjectSortOrder] = useState('name');
+  const [approvalMode, setApprovalMode] = useState('default');
   const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState(null);
   const [geminiBinaryPath, setGeminiBinaryPath] = useState('');
@@ -35,6 +41,7 @@ function ToolsSettings({ isOpen, onClose }) {
           setEnableNotificationSound(settings.enableNotificationSound);
         }
         if (settings.projectSortOrder) setProjectSortOrder(settings.projectSortOrder);
+        setApprovalMode(normalizeApprovalMode(settings.approvalMode));
       }
     } catch (error) {
       console.error('Error loading settings:', error);
@@ -79,7 +86,8 @@ function ToolsSettings({ isOpen, onClose }) {
       const updatedSettings = {
         ...current,
         enableNotificationSound,
-        projectSortOrder
+        projectSortOrder,
+        approvalMode: normalizeApprovalMode(approvalMode)
       };
 
       localStorage.setItem('gemini-tools-settings', JSON.stringify(updatedSettings));
@@ -302,6 +310,49 @@ function ToolsSettings({ isOpen, onClose }) {
               >
                 <option value="name">{language === 'zh' ? '按名称排序' : 'Alphabetical'}</option>
                 <option value="date">{language === 'zh' ? '按最近活动' : 'Recent Activity'}</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Gemini CLI Session / Approval Mode */}
+          <div className="bg-gray-50 dark:bg-gray-900/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start gap-3 min-w-0">
+                <ShieldCheck className="w-5 h-5 text-emerald-500 mt-0.5 flex-shrink-0" />
+                <div className="min-w-0">
+                  <div className="font-medium text-foreground">
+                    {language === 'zh' ? '会话模式' : 'Session Mode'}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-0.5">
+                    {language === 'zh'
+                      ? '控制 Gemini CLI 执行工具时的审批策略'
+                      : 'Controls how Gemini CLI approves tool execution'}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-2">
+                    {approvalMode === 'default' && (language === 'zh'
+                      ? '默认：需要时询问确认。'
+                      : 'Default: asks for confirmation when needed.')}
+                    {approvalMode === 'auto_edit' && (language === 'zh'
+                      ? '自动编辑：自动批准编辑类操作，其他敏感操作仍可能询问。'
+                      : 'Auto Edit: auto-approves edit operations; other sensitive actions may still ask.')}
+                    {approvalMode === 'plan' && (language === 'zh'
+                      ? '计划：只读研究与规划模式。'
+                      : 'Plan: read-only research and planning mode.')}
+                    {approvalMode === 'yolo' && (language === 'zh'
+                      ? 'YOLO：自动批准所有工具调用，请仅在可信环境中使用。'
+                      : 'YOLO: auto-approves all tool calls. Use only in trusted environments.')}
+                  </div>
+                </div>
+              </div>
+              <select
+                value={approvalMode}
+                onChange={(e) => setApprovalMode(normalizeApprovalMode(e.target.value))}
+                className="text-sm bg-background border border-border text-foreground rounded-lg focus:ring-blue-500 focus:border-blue-500 p-2 min-w-[130px] flex-shrink-0"
+              >
+                <option value="default">Default</option>
+                <option value="auto_edit">Auto Edit</option>
+                <option value="plan">Plan</option>
+                <option value="yolo">YOLO</option>
               </select>
             </div>
           </div>

@@ -79,6 +79,7 @@ function getGeminiRunStatus(runId) {
 }
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const GEMINI_BINARY_SETTING_KEY = 'gemini_binary_path';
+const GEMINI_APPROVAL_MODES = new Set(['default', 'auto_edit', 'plan', 'yolo']);
 
 async function fileExists(filePath) {
   try {
@@ -159,6 +160,13 @@ async function spawnGemini(command, options = {}, ws) {
     
     // Always trust workspace in automated/headless mode
     args.push('--skip-trust');
+
+    // Approval mode is selected by Gemini CLI UI. Validate it server-side so
+    // arbitrary client input cannot be forwarded as a CLI argument.
+    const approvalMode = GEMINI_APPROVAL_MODES.has(options.approvalMode)
+      ? options.approvalMode
+      : 'default';
+    args.push(`--approval-mode=${approvalMode}`);
 
     // Resume existing session if sessionId is provided
     if (sessionId) {

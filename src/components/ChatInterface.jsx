@@ -64,6 +64,21 @@ const GEMINI_TERMINAL_MESSAGE_TYPES = new Set([
   'error'
 ]);
 
+const GEMINI_APPROVAL_MODES = ['default', 'auto_edit', 'plan', 'yolo'];
+
+const normalizeApprovalMode = (mode) =>
+  GEMINI_APPROVAL_MODES.includes(mode) ? mode : 'default';
+
+const readStoredApprovalMode = () => {
+  if (typeof window === 'undefined') return 'default';
+  try {
+    const settings = JSON.parse(localStorage.getItem('gemini-tools-settings') || '{}');
+    return normalizeApprovalMode(settings.approvalMode);
+  } catch {
+    return 'default';
+  }
+};
+
 const normalizeProjectPath = (value = '') => String(value || '').replace(/\\/g, '/').replace(/\/$/, '');
 
 const getActiveRunStorageKey = (projectName, sessionId) =>
@@ -617,7 +632,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   const [sessionMessages, setSessionMessages] = useState([]);
   const [isLoadingSessionMessages, setIsLoadingSessionMessages] = useState(false);
   const [isSystemSessionChange, setIsSystemSessionChange] = useState(false);
-  const [permissionMode, setPermissionMode] = useState('default');
+  const [approvalMode, setApprovalMode] = useState(readStoredApprovalMode);
   const [attachedFiles, setAttachedFiles] = useState([]);
   const [attachmentErrors, setAttachmentErrors] = useState(new Map());
   const messagesEndRef = useRef(null);
@@ -647,6 +662,28 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   const [elapsedTime, setElapsedTime] = useState(0);
   const [animationPhase, setAnimationPhase] = useState(0);
   const finishedRunIdsRef = useRef(new Set());
+
+  const persistApprovalMode = useCallback((mode) => {
+    const normalizedMode = normalizeApprovalMode(mode);
+    setApprovalMode(normalizedMode);
+
+    try {
+      const current = JSON.parse(localStorage.getItem('gemini-tools-settings') || '{}');
+      const updatedSettings = {
+        ...current,
+        approvalMode: normalizedMode
+      };
+      const serializedSettings = JSON.stringify(updatedSettings);
+      localStorage.setItem('gemini-tools-settings', serializedSettings);
+      window.dispatchEvent(new StorageEvent('storage', {
+        key: 'gemini-tools-settings',
+        newValue: serializedSettings,
+        storageArea: localStorage
+      }));
+    } catch (error) {
+      console.error('Error saving Gemini approval mode:', error);
+    }
+  }, []);
 
   useEffect(() => {
     const storedRunId = sessionStorage.getItem(activeRunStorageKey);
@@ -1161,6 +1198,13 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   useEffect(() => {
     const handleStorageChange = (e) => {
       if (e.key === 'gemini-tools-settings') {
+        try {
+          const settings = JSON.parse(e.newValue || localStorage.getItem('gemini-tools-settings') || '{}');
+          setApprovalMode(normalizeApprovalMode(settings.approvalMode));
+        } catch (error) {
+          setApprovalMode('default');
+        }
+
         // Add a system message to notify settings have been applied
         setChatMessages(prev => [...prev, {
           id: `system-${Date.now()}`,
@@ -2028,6 +2072,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         cwd: selectedProject.path,
         sessionId: resumeSessionId,
         resume: !!resumeSessionId,
+        approvalMode,
         attachments: uploadedAttachments.map(({ data, ...attachment }) => attachment)
       }
     });
@@ -2093,18 +2138,14 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
       }
     }
     
-    // Handle Tab key for mode switching (only when file dropdown is not showing)
-    // Disabled for Gemini - no permission modes
-    /*
+    // Handle Tab key for Gemini approval mode switching (only when file dropdown is not showing)
     if (e.key === 'Tab' && !showFileDropdown) {
       e.preventDefault();
-      const modes = ['default', 'acceptEdits', 'bypassPermissions', 'plan'];
-      const currentIndex = modes.indexOf(permissionMode);
-      const nextIndex = (currentIndex + 1) % modes.length;
-      setPermissionMode(modes[nextIndex]);
+      const currentIndex = GEMINI_APPROVAL_MODES.indexOf(approvalMode);
+      const nextIndex = (currentIndex + 1) % GEMINI_APPROVAL_MODES.length;
+      persistApprovalMode(GEMINI_APPROVAL_MODES[nextIndex]);
       return;
     }
-    */
     
     // Handle Enter key: Ctrl+Enter (Cmd+Enter on Mac) sends, Shift+Enter creates new line
     if (e.key === 'Enter') {
@@ -2211,14 +2252,6 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     }
   };
 
-  const handleModeSwitch = () => {
-    // Disabled for Gemini - no permission modes
-    // const modes = ['default', 'acceptEdits', 'bypassPermissions', 'plan'];
-    // const currentIndex = modes.indexOf(permissionMode);
-    // const nextIndex = (currentIndex + 1) % modes.length;
-    // setPermissionMode(modes[nextIndex]);
-  };
-
   // Don't render if no project is selected
   if (!selectedProject) {
     return (
@@ -2322,7 +2355,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
 
       {/* Input Area - Fixed Bottom */}
       <div className="p-2 sm:p-4 md:p-6 flex-shrink-0">
-        {/* Gemini Model & Reasoning Effort Indicator (Read-only) */}
+        {/* Gemini model, approval mode & reasoning indicator */}
         <div className="max-w-4xl mx-auto mb-3">
           <div className="flex items-center justify-center gap-2">
             <div className="px-3.5 py-1.5 rounded-lg text-xs font-medium border transition-all duration-200 bg-card/90 dark:bg-gray-850 border-border text-foreground shadow-sm flex items-center gap-2.5 backdrop-blur-sm select-none flex-wrap justify-center">
@@ -2340,6 +2373,32 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
                 </span>
               </div>
               
+              <span className="text-border hidden sm:inline">|</span>
+
+              <label className="flex items-center gap-1 cursor-pointer">
+                <span className="text-muted-foreground whitespace-nowrap">
+                  {language === 'zh' ? '会话模式' : 'Mode'}:
+                </span>
+                <select
+                  value={approvalMode}
+                  onChange={(e) => persistApprovalMode(e.target.value)}
+                  disabled={isLoading}
+                  title={isLoading
+                    ? (language === 'zh' ? '当前任务运行中，请在任务结束后切换会话模式' : 'Wait for the current task to finish before changing session mode')
+                    : (language === 'zh' ? '切换 Gemini CLI 会话模式' : 'Change Gemini CLI session mode')}
+                  className={`font-mono font-semibold px-1.5 py-0.5 rounded border outline-none transition-colors ${
+                    approvalMode === 'yolo'
+                      ? 'text-orange-600 dark:text-orange-400 bg-orange-500/10 border-orange-500/20'
+                      : 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+                  } ${isLoading ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer hover:bg-muted'}`}
+                >
+                  <option value="default">{language === 'zh' ? '默认' : 'Default'}</option>
+                  <option value="auto_edit">{language === 'zh' ? '自动编辑' : 'Auto Edit'}</option>
+                  <option value="plan">{language === 'zh' ? '计划' : 'Plan'}</option>
+                  <option value="yolo">YOLO</option>
+                </select>
+              </label>
+
               <span className="text-border hidden sm:inline">|</span>
               
               <div className="flex items-center gap-1">
