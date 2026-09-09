@@ -8,6 +8,7 @@ import ProjectContextPanel from './ProjectContextPanel';
 function MainContent({ 
   selectedProject, 
   selectedSession, 
+  requestedSessionId,
   activeSessions,
   ws, 
   sendMessage, 
@@ -257,6 +258,7 @@ function MainContent({
             key={selectedProject.name}
             selectedProject={selectedProject}
             selectedSession={selectedSession}
+            requestedSessionId={requestedSessionId}
             ws={ws}
             sendMessage={sendMessage}
             messages={messages}

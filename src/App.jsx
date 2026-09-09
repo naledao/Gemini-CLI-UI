@@ -634,6 +634,7 @@ function AppContent() {
         <MainContent
           selectedProject={selectedProject}
           selectedSession={selectedSession}
+          requestedSessionId={sessionId || null}
           activeSessions={activeSessions}
           ws={ws}
           sendMessage={sendMessage}
@@ -647,7 +648,7 @@ function AppContent() {
           onSessionActive={markSessionAsActive}
           onSessionInactive={markSessionAsInactive}
           onReplaceTemporarySession={replaceTemporarySession}
-          onNavigateToSession={(sessionId) => navigate(`/session/${sessionId}`)}
+          onNavigateToSession={(nextSessionId, options = {}) => navigate(`/session/${nextSessionId}`, options)}
           onShowSettings={() => setShowToolsSettings(true)}
           showRawParameters={showRawParameters}
           autoScrollToBottom={autoScrollToBottom}

@@ -36,6 +36,34 @@ function resolveToolWorkingDirectory(toolName, params, workspaceRoot) {
 
 let activeGeminiProcesses = new Map(); // Track active processes by session ID
 
+const GEMINI_NETWORK_FAILURE_PATTERN = /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|UND_ERR|socket hang up|network(?: request)? failed/i;
+const GEMINI_RATE_LIMIT_PATTERN = /Upstream rate limit exceeded|RESOURCE_EXHAUSTED|status\s+429/i;
+const GEMINI_AUTH_FAILURE_PATTERN = /invalid_grant/i;
+
+function sanitizeUpstreamForClient(value) {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return String(value).split(/[?#]/, 1)[0].replace(/\/$/, '') || null;
+  }
+}
+
+function getSafeTerminalGeminiError(stderr) {
+  const text = String(stderr || '');
+  if (GEMINI_AUTH_FAILURE_PATTERN.test(text)) {
+    return 'Gemini authentication failed (invalid_grant)';
+  }
+  if (GEMINI_RATE_LIMIT_PATTERN.test(text)) {
+    return 'Gemini upstream rate limit was exhausted';
+  }
+  if (GEMINI_NETWORK_FAILURE_PATTERN.test(text)) {
+    return 'Gemini network request failed after retries';
+  }
+  return null;
+}
+
 async function getGeminiUpstreamBaseUrl() {
   const fromEnv = process.env.GOOGLE_GEMINI_BASE_URL?.trim();
   if (fromEnv) return fromEnv.replace(/\/$/, '');
@@ -322,6 +350,7 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
     
     const geminiLaunch = await resolveGeminiLaunch();
     const upstreamBaseUrl = await getGeminiUpstreamBaseUrl();
+    const clientSafeUpstream = sanitizeUpstreamForClient(upstreamBaseUrl);
     const launchArgs = [...geminiLaunch.prefixArgs, ...args];
     console.log('🚀 Spawning Gemini CLI:', geminiLaunch.displayPath, args.join(' '));
     console.log('📂 Working directory:', workingDir);
@@ -355,7 +384,7 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
       const status = {
         can_interrupt: true,
         timestamp: new Date().toISOString(),
-        ...(upstreamBaseUrl ? { upstream: upstreamBaseUrl } : {}),
+        ...(clientSafeUpstream ? { upstream: clientSafeUpstream } : {}),
         ...data
       };
       geminiProcess.runtimeStatus = status;
@@ -369,7 +398,9 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
     // Close stdin to signal we're done sending input
     geminiProcess.stdin.end();
     
-    // Add timeout handler (10 minutes for long analysis tasks, users can click Stop anytime)
+    // Add a no-progress timeout. Receiving init once must not disable timeout
+    // forever: every new stdout chunk rearms the 10 minute window, while
+    // repeated stderr retry logs intentionally do not count as progress.
     let hasReceivedOutput = false;
     let terminalEventSent = false;
     const sendTerminalEvent = (event) => {
@@ -383,16 +414,25 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
       return true;
     };
     const timeoutMs = 600000; // 10 minutes
-    const timeout = setTimeout(() => {
-      if (!hasReceivedOutput) {
-        console.error('⏰ Gemini CLI timeout - no output received after', timeoutMs, 'ms');
+    let timeout = null;
+    const armProgressTimeout = () => {
+      if (timeout) clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        console.error('⏰ Gemini CLI timeout - no stdout progress after', timeoutMs, 'ms');
+        geminiProcess.timeoutRequested = true;
+        sendRuntimeStatus({
+          kind: 'timeout',
+          phase: 'failed',
+          status: 'NO_STDOUT_PROGRESS'
+        });
         sendTerminalEvent({
           type: 'gemini-error',
-          error: 'Gemini CLI timeout - no response received'
+          error: 'Gemini CLI timed out after 10 minutes without output progress'
         });
-        geminiProcess.kill('SIGTERM');
-      }
-    }, timeoutMs);
+        signalGeminiProcessTree(geminiProcess, 'SIGTERM');
+      }, timeoutMs);
+    };
+    armProgressTimeout();
     
     // Save user message to session when starting
     if (command && capturedSessionId) {
@@ -405,7 +445,7 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
     
     geminiProcess.stdout.on('data', (data) => {
       hasReceivedOutput = true;
-      clearTimeout(timeout);
+      armProgressTimeout();
       
       lineBuffer += data.toString();
       const lines = lineBuffer.split('\n');
@@ -561,7 +601,26 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
         return;
       }
 
-      if (/Upstream rate limit exceeded|RESOURCE_EXHAUSTED/i.test(line)) {
+      const genericRetryMatch = line.match(/Attempt\s+(\d+)\s+failed\.\s+Retrying\s+with\s+backoff/i);
+      if (genericRetryMatch) {
+        const attempt = Number(genericRetryMatch[1]);
+        lastRetryAttempt = attempt;
+        sendRuntimeStatus(GEMINI_NETWORK_FAILURE_PATTERN.test(line)
+          ? {
+              kind: 'network_error',
+              phase: 'retrying',
+              attempt,
+              status: 'NETWORK_ERROR'
+            }
+          : {
+              kind: 'retry',
+              phase: 'retrying',
+              attempt
+            });
+        return;
+      }
+
+      if (GEMINI_RATE_LIMIT_PATTERN.test(line)) {
         sendRuntimeStatus({
           kind: 'rate_limit',
           phase: 'retrying',
@@ -572,12 +631,22 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
         return;
       }
 
-      if (/invalid_grant/i.test(line)) {
+      if (GEMINI_AUTH_FAILURE_PATTERN.test(line)) {
         sendRuntimeStatus({
           kind: 'auth_error',
           phase: 'failed',
           statusCode: 400,
           status: 'invalid_grant'
+        });
+        return;
+      }
+
+      if (GEMINI_NETWORK_FAILURE_PATTERN.test(line)) {
+        sendRuntimeStatus({
+          kind: 'network_error',
+          phase: 'retrying',
+          attempt: lastRetryAttempt || null,
+          status: 'NETWORK_ERROR'
         });
       }
     };
@@ -595,8 +664,9 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
     // Handle process completion
     geminiProcess.on('close', async (code, signal) => {
       console.log(`Gemini CLI process exited with code ${code}${signal ? ` signal ${signal}` : ''}`);
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       const wasAborted = geminiProcess.abortRequested === true;
+      const wasTimedOut = geminiProcess.timeoutRequested === true;
 
       if (stderrLineBuffer.trim()) {
         processStderrLine(stderrLineBuffer);
@@ -635,18 +705,29 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
       if (finalSessionId && fullResponse) {
         sessionManager.addMessage(finalSessionId, 'assistant', fullResponse);
       }
-      
-      // If process failed with non-zero code and produced no output, notify client of error
-      if (!wasAborted && code !== 0 && !hasReceivedOutput && !fullResponse) {
+
+      const terminalDiagnostic = !fullResponse
+        ? getSafeTerminalGeminiError(stderrBuffer)
+        : null;
+
+      if (!wasAborted && !wasTimedOut && terminalDiagnostic) {
         sendTerminalEvent({
           type: 'gemini-error',
-          error: stderrBuffer.trim() || `Gemini CLI process exited with code ${code}`
+          error: terminalDiagnostic
+        });
+      }
+      
+      // If process failed with non-zero code and produced no output, notify client of error
+      if (!wasAborted && !wasTimedOut && !terminalDiagnostic && code !== 0 && !hasReceivedOutput && !fullResponse) {
+        sendTerminalEvent({
+          type: 'gemini-error',
+          error: `Gemini CLI process exited with code ${code}`
         });
       }
 
       // abort-session already emitted a scoped session-aborted event. Do not
       // follow it with gemini-complete/gemini-error for the same cancelled run.
-      if (wasAborted) {
+      if (wasAborted || wasTimedOut || terminalDiagnostic) {
         resolve();
       } else if (code === 0) {
         sendTerminalEvent({
@@ -668,6 +749,7 @@ ${attachmentPaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
     // Handle process errors
     geminiProcess.on('error', (error) => {
       // console.error('Gemini CLI process error:', error);
+      if (timeout) clearTimeout(timeout);
       
       // Clean up process reference on error
       const finalSessionId = capturedSessionId || sessionId || processKey;

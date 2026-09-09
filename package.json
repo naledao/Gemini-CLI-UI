@@ -9,6 +9,7 @@
     "server": "node server/index.js",
     "client": "vite --host",
     "build": "vite build",
+    "test:session-continuity": "node --test tests/sessionContinuity.test.js",
     "build:binary": "npm run build && mkdir -p bin && caxa --input . --output ./bin/gemini-cli-ui --exclude 'src/**' '.git/**' 'node_modules/.cache/**' 'public/screenshots/**' 'image.png' -- \"{{caxa}}/node_modules/.bin/node\" \"{{caxa}}/server/index.js\"",
     "preview": "vite preview",
     "start": "npm run build && npm run server",

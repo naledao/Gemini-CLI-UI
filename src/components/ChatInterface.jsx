@@ -28,6 +28,7 @@ import { MicButton } from './MicButton.jsx';
 import { api } from '../utils/api';
 import { playNotificationSound } from '../utils/notificationSound';
 import { useLanguage } from '../contexts/LanguageContext';
+import { resolveResumeSessionId, resolveUiSessionId } from '../utils/sessionContinuity';
 
 const formatAttachmentSize = (bytes = 0) => {
   if (bytes < 1024) return `${bytes} B`;
@@ -144,6 +145,24 @@ const formatGeminiRuntimeStatus = (statusData, language) => {
       .join(' · ');
     const base = language === 'zh' ? '认证失败' : 'Authentication failed';
     return details ? `${base} · ${details}` : base;
+  }
+
+  if (statusData.kind === 'network_error') {
+    const attempt = statusData.attempt
+      ? (language === 'zh' ? `（第 ${statusData.attempt} 次）` : ` (attempt ${statusData.attempt})`)
+      : '';
+    const base = statusData.phase === 'failed'
+      ? (language === 'zh' ? '网络请求失败' : 'Network request failed')
+      : (language === 'zh'
+          ? `网络请求失败，正在重试${attempt}`
+          : `Network request failed, retrying${attempt}`);
+    return upstreamHost ? `${base} · ${upstreamHost}` : base;
+  }
+
+  if (statusData.kind === 'timeout') {
+    return language === 'zh'
+      ? '长时间未收到新输出，任务已超时'
+      : 'No new output for a long time; task timed out';
   }
 
   if (statusData.kind === 'retry') {
@@ -605,10 +624,16 @@ const AttachmentPreview = ({ file, onRemove, error }) => {
 // - onReplaceTemporarySession: Called to replace temporary session ID with real WebSocket session ID
 //
 // This ensures uninterrupted chat experience by pausing sidebar refreshes during conversations.
-function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, messages, onFileOpen, onInputFocusChange, onSessionActive, onSessionInactive, onReplaceTemporarySession, onNavigateToSession, onShowSettings, showRawParameters, autoScrollToBottom }) {
+function ChatInterface({ selectedProject, selectedSession, requestedSessionId, ws, sendMessage, messages, onFileOpen, onInputFocusChange, onSessionActive, onSessionInactive, onReplaceTemporarySession, onNavigateToSession, onShowSettings, showRawParameters, autoScrollToBottom }) {
   const { t, language } = useLanguage();
   const processedIndexStorageKey = `gemini_processed_index:${selectedProject?.name || 'none'}`;
-  const activeRunStorageKey = getActiveRunStorageKey(selectedProject?.name, selectedSession?.id || 'new');
+  const activeRunStorageKey = getActiveRunStorageKey(
+    selectedProject?.name,
+    resolveUiSessionId({
+      selectedSessionId: selectedSession?.id,
+      requestedSessionId
+    })
+  );
   const legacyProjectRunStorageKey = `gemini_active_run:${selectedProject?.name || 'none'}`;
   const pendingSessionStorageKey = `pendingSessionId:${selectedProject?.name || 'none'}`;
   const [input, setInput] = useState(() => {
@@ -1141,6 +1166,26 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
             setIsSystemSessionChange(false);
           }
         }
+      } else if (selectedProject) {
+        // A freshly-created Gemini session can be known before the projects
+        // sidebar refresh has materialized it as selectedSession. Treat the
+        // route (or the very short-lived pending ID before navigation lands)
+        // as authoritative during that gap instead of resetting the native
+        // session to null and accidentally starting another conversation.
+        const pendingSessionId = sessionStorage.getItem(pendingSessionStorageKey);
+        const bridgedSessionId = requestedSessionId || pendingSessionId;
+
+        if (bridgedSessionId) {
+          setCurrentSessionId(bridgedSessionId);
+          setCurrentSessionResumable(true);
+          return;
+        }
+
+        setChatMessages([]);
+        setSessionMessages([]);
+        setCurrentSessionId(null);
+        setCurrentSessionResumable(true);
+        previousSessionIdRef.current = null;
       } else {
         setChatMessages([]);
         setSessionMessages([]);
@@ -1151,7 +1196,18 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     };
     
     loadMessages();
-  }, [selectedSession, selectedProject, loadSessionMessages, scrollToBottom, isSystemSessionChange, autoScrollToBottom]);
+  }, [selectedSession, selectedProject, requestedSessionId, pendingSessionStorageKey, loadSessionMessages, scrollToBottom, isSystemSessionChange, autoScrollToBottom]);
+
+  // Once the URL or sidebar has caught up, the pending bridge has served its
+  // purpose. Removing it prevents an old completed session from ever being
+  // reused when the user explicitly starts another new conversation.
+  useEffect(() => {
+    const pendingSessionId = sessionStorage.getItem(pendingSessionStorageKey);
+    if (pendingSessionId &&
+        (requestedSessionId === pendingSessionId || selectedSession?.id === pendingSessionId)) {
+      sessionStorage.removeItem(pendingSessionStorageKey);
+    }
+  }, [pendingSessionStorageKey, requestedSessionId, selectedSession?.id]);
 
   // Update chatMessages when convertedMessages changes
   useEffect(() => {
@@ -1264,9 +1320,16 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           if (latestMessage.model) {
             setSessionModel(latestMessage.model);
           }
-          // Store it temporarily until conversation completes (prevents premature session association)
+          // Promote a newly-created native session immediately. The project
+          // list may need another refresh before selectedSession exists, so we
+          // also navigate to the native session ID and keep a short-lived
+          // pending bridge. This guarantees the very next prompt uses --resume
+          // for this same Gemini conversation.
           if (latestMessage.sessionId && (!currentSessionId || !currentSessionResumable)) {
             sessionStorage.setItem(pendingSessionStorageKey, latestMessage.sessionId);
+            setCurrentSessionId(latestMessage.sessionId);
+            setCurrentSessionResumable(true);
+            setIsSystemSessionChange(true);
             migrateRunStateToSession(
               latestMessage.sessionId,
               latestMessage.runId || currentRunId,
@@ -1278,6 +1341,10 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
             // The temporary session is removed and real session is marked as active
             if (onReplaceTemporarySession) {
               onReplaceTemporarySession(selectedProject?.name, latestMessage.sessionId, latestMessage.runId || currentRunId);
+            }
+
+            if (onNavigateToSession && requestedSessionId !== latestMessage.sessionId) {
+              onNavigateToSession(latestMessage.sessionId, { replace: true });
             }
           }
           break;
@@ -1568,16 +1635,19 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           // Session Protection: Mark session as inactive to re-enable automatic project updates
           // Conversation is complete, safe to allow project updates again
           // Use real session ID if available, otherwise use pending session ID
-          const activeSessionId = currentSessionResumable ? currentSessionId : null;
+          const activeSessionId = currentSessionResumable
+            ? (currentSessionId || requestedSessionId)
+            : null;
           const pendingSessionId = sessionStorage.getItem(pendingSessionStorageKey);
+          const finalSessionId = latestMessage.sessionId || activeSessionId || pendingSessionId;
           clearRunState({
-            sessionId: latestMessage.sessionId || activeSessionId || pendingSessionId,
+            sessionId: finalSessionId,
             runId: latestMessage.runId || currentRunId
           });
 
-          // If a legacy-only history was opened, this run deliberately started a
-          // fresh native conversation. Promote the native id once creation succeeds.
-          if (pendingSessionId && (!currentSessionId || !currentSessionResumable) && latestMessage.exitCode === 0) {
+          // A successful new/legacy promotion no longer needs its temporary
+          // bridge once the final native ID is known.
+          if (pendingSessionId && pendingSessionId === finalSessionId && latestMessage.exitCode === 0) {
             setCurrentSessionId(pendingSessionId);
             setCurrentSessionResumable(true);
             sessionStorage.removeItem(pendingSessionStorageKey);
@@ -1588,7 +1658,6 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           }
 
           // Auto sync session messages from backend on completion for guaranteed consistency
-          const finalSessionId = activeSessionId || pendingSessionId;
           if (finalSessionId && selectedProject && latestMessage.exitCode === 0) {
             setTimeout(() => {
               loadSessionMessages(selectedProject.name, finalSessionId).catch(() => {});
@@ -2055,7 +2124,11 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     // 1. Existing sessions: Use the real currentSessionId
     // 2. New sessions: Use this project's stable run ID until Gemini reports the real session ID
     // This ensures no gap in protection between message send and session creation
-    const resumeSessionId = currentSessionResumable ? currentSessionId : null;
+    const resumeSessionId = resolveResumeSessionId({
+      currentSessionId,
+      requestedSessionId,
+      resumable: currentSessionResumable
+    });
     const sessionToActivate = resumeSessionId || `run:${runId}`;
     if (onSessionActive) {
       onSessionActive(selectedProject.name, sessionToActivate);
